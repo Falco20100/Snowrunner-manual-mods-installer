@@ -7,9 +7,20 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-py -3 -m pip install pyinstaller==6.11.1
+py -3.13 -c "import sys" >nul 2>nul
+if errorlevel 1 (
+  echo Python 3.13 is required for this build. Install it from python.org.
+  pause
+  exit /b 1
+)
+if not exist "icon.png" (
+  echo Place your icon image in this folder as icon.png before building.
+  pause
+  exit /b 1
+)
+py -3.13 -m pip install pyinstaller==6.11.1 pillow
 if errorlevel 1 goto failed
-py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name SnowRunnerManualInstaller app.py
+py -3.13 -m PyInstaller --noconfirm --clean --onefile --windowed --icon "icon.png" --add-data "icon.png;." --name SnowRunnerManualInstaller app.py
 if errorlevel 1 goto failed
 echo.
 echo Portable EXE created: dist\SnowRunnerManualInstaller.exe

@@ -1,4 +1,5 @@
 """SnowRunner manual mod installer: offline desktop UI."""
+from pathlib import Path
 import queue
 import threading
 import tkinter as tk
@@ -47,6 +48,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SnowRunner Manual Mod Installer")
+        icon_path = Path(__file__).resolve().parent / "icon.png"
+        if icon_path.is_file():
+            self.icon_image = tk.PhotoImage(file=str(icon_path))
+            self.iconphoto(True, self.icon_image)
         self.geometry("1100x760")
         self.minsize(850, 620)
         self.jobs = []
