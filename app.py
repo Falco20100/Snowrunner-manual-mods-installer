@@ -59,6 +59,8 @@ class App(tk.Tk):
         self.busy = False
         self.detecting = False
         self.game = tk.StringVar()
+        self.path_revision = 0
+        self.game.trace_add("write", self.path_changed)
         self.mode = tk.StringVar(value="Binary mod → Sources/Bin")
         self.status = tk.StringVar(value="Choose the SnowRunner folder, then add downloaded ZIPs or extracted folders.")
         self._build()
@@ -171,25 +173,28 @@ class App(tk.Tk):
         if item:
             webbrowser.open(item[1])
 
+    def path_changed(self, *_):
+        self.path_revision += 1
+
     def detect_game(self):
         if self.detecting or self.busy:
             return
         self.detecting = True
         self.detect_button.configure(state="disabled")
         self.status.set("Looking for SnowRunner in Steam, Epic Games, and PC Game Pass…")
-        initial_path = self.game.get()
+        initial_revision = self.path_revision
         def work():
             try:
-                self.events.put(("detected", (detect_game_installations(), initial_path)))
+                self.events.put(("detected", (detect_game_installations(), initial_revision)))
             except Exception as exc:
-                self.events.put(("detect_error", str(exc)))
+                self.events.put(("detect_error", (str(exc), initial_revision)))
         threading.Thread(target=work, daemon=True).start()
 
-    def show_detected(self, found, initial_path):
+    def show_detected(self, found, initial_revision):
         if self.busy:
             self.log("Detection finished while an operation was running; the selected folder was not changed. Use Detect to search again.")
             return
-        if self.game.get() != initial_path:
+        if self.path_revision != initial_revision:
             self.status.set("Detection finished; your manually entered folder was kept.")
             return
         if not found:
@@ -211,7 +216,11 @@ class App(tk.Tk):
                 choices.insert(tk.END, f"{store} — {path}")
             choices.selection_set(0)
             def choose():
-                if self.busy or self.game.get() != initial_path:
+                if self.busy:
+                    self.log("Selection was not changed while an operation is running.")
+                    window.destroy()
+                    return
+                if self.path_revision != initial_revision:
                     self.status.set("Your manually entered folder was kept.")
                     window.destroy()
                     return
@@ -299,8 +308,10 @@ class App(tk.Tk):
                     if kind == "detected":
                         self.show_detected(*value)
                     else:
-                        self.log("Detection error: " + value)
-                        self.status.set("Detection failed. Use Browse to select the game folder.")
+                        error, initial_revision = value
+                        self.log("Detection error: " + error)
+                        if not self.busy and self.path_revision == initial_revision:
+                            self.status.set("Detection failed. Use Browse to select the game folder.")
                     continue
                 self.busy = False
                 self.install_button.configure(state="normal")
