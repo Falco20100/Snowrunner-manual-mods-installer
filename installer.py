@@ -1,11 +1,14 @@
 """Manual SnowRunner installation engine. No mod files are distributed here."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -53,6 +56,145 @@ def game_paths(root: str):
         if (bin_dir / "SnowRunner.exe").is_file() and (pak_dir / "initial.pak").is_file():
             return base, bin_dir, pak_dir
     raise InstallError("Choose the SnowRunner game folder (or Sources/Bin). SnowRunner.exe and preload/paks/client/initial.pak must both exist.")
+
+
+def _steam_roots():
+    roots = []
+    if sys.platform != "win32":
+        return roots
+    import winreg
+    for hive, key, value in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as opened:
+                path, _ = winreg.QueryValueEx(opened, value)
+            if isinstance(path, str) and path:
+                roots.append(Path(path))
+        except OSError:
+            continue
+    program_files = os.environ.get("ProgramFiles(x86)")
+    if program_files:
+        roots.append(Path(program_files) / "Steam")
+    return roots
+
+
+def _vdf_pairs(text):
+    # KeyValues paths escape backslashes and quotes. Leave other characters intact.
+    pattern = r'"((?:\\.|[^"\\])*)"\s+"((?:\\.|[^"\\])*)"'
+    def unescape(value):
+        return re.sub(r'\\([\\"])', r'\1', value)
+    return [(unescape(key), unescape(value)) for key, value in re.findall(pattern, text)]
+
+
+def _read_vdf(path):
+    try:
+        return _vdf_pairs(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError):
+        return []
+
+
+def _steam_candidates():
+    libraries = []
+    for steam in _steam_roots():
+        libraries.append(steam)
+        for vdf in (steam / "steamapps" / "libraryfolders.vdf", steam / "config" / "libraryfolders.vdf"):
+            for key, value in _read_vdf(vdf):
+                if key.lower() == "path" or key.isdigit():
+                    # Older Steam versions use numbered string entries for paths.
+                    if (Path(value) / "steamapps").is_dir():
+                        libraries.append(Path(value))
+    for library in libraries:
+        pairs = _read_vdf(library / "steamapps" / "appmanifest_1465360.acf")
+        values = {key.lower(): value for key, value in pairs}
+        name = values.get("installdir", "")
+        # An install directory must be a single folder within this Steam library.
+        if values.get("appid") == "1465360" and name and name not in {".", ".."} and not any(c in name for c in '/\\:'):
+            yield library / "steamapps" / "common" / name
+
+
+def _epic_candidates():
+    program_data = os.environ.get("PROGRAMDATA")
+    if not program_data:
+        return
+    manifests = Path(program_data) / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+    try:
+        paths = list(manifests.glob("*.item"))
+    except OSError:
+        return
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("bIsIncompleteInstall") is True:
+            continue
+        location = data.get("InstallLocation")
+        if isinstance(location, str) and location:
+            # Validate the game files below rather than relying on localized display names.
+            yield Path(location)
+
+
+def _xbox_roots():
+    # Restrict probing to mounted local drives, not disconnected network drives.
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    for index in range(26):
+        if mask & (1 << index):
+            root = f"{chr(ord('A') + index)}:\\"
+            if ctypes.windll.kernel32.GetDriveTypeW(root) in (2, 3):
+                yield Path(root) / "XboxGames"
+
+
+def _game_pass_candidates():
+    if sys.platform != "win32":
+        return
+    # Query the current user's package registrations without requesting elevation.
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    script = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+              "$p = @(Get-AppxPackage -Name '*SnowRunner*' -ErrorAction Stop | "
+              "Where-Object { $_.InstallLocation } | ForEach-Object { $_.InstallLocation }); "
+              "ConvertTo-Json -InputObject $p -Compress")
+    try:
+        result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command", script],
+                                capture_output=True, encoding="utf-8-sig", errors="replace", check=True,
+                                timeout=10, creationflags=0x08000000)
+        locations = json.loads(result.stdout)
+        if isinstance(locations, list):
+            for location in locations:
+                if isinstance(location, str) and location:
+                    yield Path(location)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    # Flat-file Xbox installations may live outside protected package folders.
+    for xbox in _xbox_roots():
+        for name in ("SnowRunner", "SnowRunner - Windows"):
+            yield xbox / name / "Content"
+
+
+def detect_game_installations():
+    """Find valid Windows installs from store metadata; never modify game files."""
+    if sys.platform != "win32":
+        return []
+    found = []
+    seen = set()
+    for store, candidates in (("Steam", _steam_candidates()), ("Epic Games", _epic_candidates()),
+                              ("PC Game Pass", _game_pass_candidates())):
+        for candidate in candidates:
+            # Store packages can point to the container instead of its Content folder.
+            for root in (candidate, candidate / "Content"):
+                try:
+                    base, _, _ = game_paths(str(root))
+                except (InstallError, OSError, RuntimeError, ValueError):
+                    continue
+                key = os.path.normcase(str(base))
+                if key not in seen:
+                    seen.add(key)
+                    found.append((store, str(base)))
+                break
+    return found
 
 
 def assert_game_closed():

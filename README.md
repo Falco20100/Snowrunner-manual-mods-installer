@@ -25,7 +25,7 @@ Build the EXE on Windows; PyInstaller does not cross-compile from Linux. The rep
 ## Install
 
 1. **Close SnowRunner. Back up your saves separately.** Check each mod's current requirements, game version, dependencies and multiplayer notes on its author page.
-2. Select the folder containing `Sources\Bin\SnowRunner.exe` and `preload\paks\client\initial.pak`. The app also accepts the containing `en_us` folder or `Sources\Bin`.
+2. The app looks for Steam, Epic Games and PC Game Pass installations on startup. If several are found, select one; use **Detect** to search again or **Browse** to choose a folder manually. The folder must contain `Sources\Bin\SnowRunner.exe` and `preload\paks\client\initial.pak`; the containing `en_us` folder or `Sources\Bin` is also accepted. Protected Game Pass installs or unavailable store metadata may require manual selection or may not be modifiable.
 3. In **Mod library**, select a mod, open its author page, and manually download its Windows ZIP. Add the ZIP or its extracted folder. For other mods use **Install queue** and select the specific destination. Multiple ZIPs can be selected at once with one method.
 4. Use **Check queue** to detect differing files in the same batch, then **Install queue**. The app checks existing file conflicts during installation. Follow messages in **Activity**. Do not launch the game until it finishes.
 5. Start the game and verify each mod. Game updates and store file verification may remove or invalidate mods.
@@ -64,7 +64,7 @@ Focus: launch stability, automatic folder detection, and accurate presets.
 - [x] **Loader conflict handling** — omit Spotter's duplicate `dinput8.dll` when a Next Gen loader is queued or was previously installed by this app. An unrecognized existing loader is refused rather than guessed.
 - [x] **Snapshot backups and restore** — pre-install state recorded under `SnowRunnerManualBackups`, restored from the recorded manifest.
 - [x] **Preset catalog** — built-in rules for Real Life Mod, Spotter, Next Gen Gameplay, Next Gen Tire Inflation, Cargo Straps, Headlight Shadows, Serj4ever's QoL Pack, and others. Mods that ship their own patcher (Next Gen Graphics, LOD Optimizer, Gameplay Tweaks, Persistent mud) are linked to their author's instructions instead of being copied.
-- [ ] **Game path auto-detection** — locate installs from Steam, Epic Games Store, and PC Game Pass instead of asking for the game folder.
+- [x] **Game path auto-detection** — discover valid Steam, Epic Games Store, and PC Game Pass installs where accessible, with manual selection as a fallback.
 - [ ] **Batch pre-flight validation** — show every collision point in the queue before anything is written. Today **Check queue** reports differing files within one batch, and existing game-file conflicts are found during install.
 
 ### Phase 2 — Linux and Steam Deck (planned, short term)

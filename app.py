@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
-from installer import InstallError, Job, game_paths, install, plan_jobs, restore_latest
+from installer import InstallError, Job, detect_game_installations, game_paths, install, plan_jobs, restore_latest
 
 
 # The catalog links to authors' pages; it never distributes or runs their files.
@@ -57,12 +57,14 @@ class App(tk.Tk):
         self.jobs = []
         self.events = queue.Queue()
         self.busy = False
+        self.detecting = False
         self.game = tk.StringVar()
         self.mode = tk.StringVar(value="Binary mod → Sources/Bin")
         self.status = tk.StringVar(value="Choose the SnowRunner folder, then add downloaded ZIPs or extracted folders.")
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.after(100, self._poll)
+        self.after(100, self.detect_game)
 
     def close_window(self):
         if self.busy:
@@ -79,7 +81,9 @@ class App(tk.Tk):
         ttk.Label(header, text="SNOWRUNNER  /  MANUAL MOD INSTALLER", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(header, text="Game folder").grid(row=1, column=0, sticky="w", pady=(14, 0))
         ttk.Entry(header, textvariable=self.game).grid(row=1, column=1, sticky="ew", padx=10, pady=(14, 0))
-        ttk.Button(header, text="Browse…", command=self.browse_game).grid(row=1, column=2, pady=(14, 0))
+        self.detect_button = ttk.Button(header, text="Detect", command=self.detect_game)
+        self.detect_button.grid(row=1, column=2, padx=(0, 6), pady=(14, 0))
+        ttk.Button(header, text="Browse…", command=self.browse_game).grid(row=1, column=3, pady=(14, 0))
         ttk.Label(self, text="Close SnowRunner before installing. Downloads are provided by mod authors, not bundled here.", padding=(16, 3)).grid(row=1, column=0, sticky="w")
         tabs = ttk.Notebook(self)
         tabs.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
@@ -167,6 +171,57 @@ class App(tk.Tk):
         if item:
             webbrowser.open(item[1])
 
+    def detect_game(self):
+        if self.detecting or self.busy:
+            return
+        self.detecting = True
+        self.detect_button.configure(state="disabled")
+        self.status.set("Looking for SnowRunner in Steam, Epic Games, and PC Game Pass…")
+        initial_path = self.game.get()
+        def work():
+            try:
+                self.events.put(("detected", (detect_game_installations(), initial_path)))
+            except Exception as exc:
+                self.events.put(("detect_error", str(exc)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_detected(self, found, initial_path):
+        if self.busy:
+            self.log("Detection finished while an operation was running; the selected folder was not changed. Use Detect to search again.")
+            return
+        if self.game.get() != initial_path:
+            self.status.set("Detection finished; your manually entered folder was kept.")
+            return
+        if not found:
+            self.status.set("No accessible installation detected. Use Browse to select the game folder.")
+        elif len(found) == 1:
+            store, path = found[0]
+            self.game.set(path)
+            self.status.set(f"Detected {store}: {path}")
+        else:
+            self.status.set("Multiple installations found. Choose one below or use Browse.")
+            window = tk.Toplevel(self)
+            window.title("Choose SnowRunner installation")
+            window.transient(self)
+            window.columnconfigure(0, weight=1)
+            ttk.Label(window, text="Select the installation to use:", padding=10).grid(row=0, column=0, sticky="w")
+            choices = tk.Listbox(window, width=90, height=min(len(found), 8), exportselection=False)
+            choices.grid(row=1, column=0, sticky="nsew", padx=10)
+            for store, path in found:
+                choices.insert(tk.END, f"{store} — {path}")
+            choices.selection_set(0)
+            def choose():
+                if self.busy or self.game.get() != initial_path:
+                    self.status.set("Your manually entered folder was kept.")
+                    window.destroy()
+                    return
+                if choices.curselection():
+                    store, path = found[choices.curselection()[0]]
+                    self.game.set(path)
+                    self.status.set(f"Selected {store}: {path}")
+                    window.destroy()
+            ttk.Button(window, text="Use selected", command=choose).grid(row=2, column=0, sticky="e", padx=10, pady=10)
+
     def browse_game(self):
         value = filedialog.askdirectory(title="Select SnowRunner game folder")
         if value:
@@ -237,6 +292,15 @@ class App(tk.Tk):
                 kind, value = self.events.get_nowait()
                 if kind == "log":
                     self.log(value)
+                    continue
+                if kind in {"detected", "detect_error"}:
+                    self.detecting = False
+                    self.detect_button.configure(state="normal")
+                    if kind == "detected":
+                        self.show_detected(*value)
+                    else:
+                        self.log("Detection error: " + value)
+                        self.status.set("Detection failed. Use Browse to select the game folder.")
                     continue
                 self.busy = False
                 self.install_button.configure(state="normal")
