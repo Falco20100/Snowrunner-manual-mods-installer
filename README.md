@@ -52,6 +52,47 @@ Click **Restore last install** to undo the most recent completed batch. Restore 
 
 PAK files are ZIP-compatible but have game-specific conventions. The app preserves original entry names and metadata, uses backslashes for added entries, and validates CRCs and replacement contents before committing. This has only been checked with synthetic archives in this repository, **not with a real SnowRunner installation**; retain independent backups and test before relying on it.
 
+## Roadmap
+
+Planned work for the SnowRunner Manual Mod Installer. Checked items describe the current source tree; they do not guarantee that the separately uploaded `SnowRunnerManualInstaller.exe` was built from that source. Unchecked items are plans, not commitments, and have no release dates. Manual mod installation is a PC workflow, so consoles are out of scope; "cross-platform" here means Windows and Linux/Steam Deck.
+
+### Phase 1 — Core launch and folder detection (current / next)
+
+Focus: launch stability, automatic folder detection, and accurate presets.
+
+- [x] **Core installer engine** — ZIP and folder parsing with validated injection into `initial.pak` and `shared.pak`.
+- [x] **Loader conflict handling** — omit Spotter's duplicate `dinput8.dll` when a Next Gen loader is queued or was previously installed by this app. An unrecognized existing loader is refused rather than guessed.
+- [x] **Snapshot backups and restore** — pre-install state recorded under `SnowRunnerManualBackups`, restored from the recorded manifest.
+- [x] **Preset catalog** — built-in rules for Real Life Mod, Spotter, Next Gen Gameplay, Next Gen Tire Inflation, Cargo Straps, Headlight Shadows, Serj4ever's QoL Pack, and others. Mods that ship their own patcher (Next Gen Graphics, LOD Optimizer, Gameplay Tweaks, Persistent mud) are linked to their author's instructions instead of being copied.
+- [ ] **Game path auto-detection** — locate installs from Steam, Epic Games Store, and PC Game Pass instead of asking for the game folder.
+- [ ] **Batch pre-flight validation** — show every collision point in the queue before anything is written. Today **Check queue** reports differing files within one batch, and existing game-file conflicts are found during install.
+
+### Phase 2 — Linux and Steam Deck (planned, short term)
+
+Focus: native Linux and Proton/Wine support, including Steam Deck.
+
+- [ ] **Cross-platform path engine** — handle Linux `/` paths alongside the game's `\` PAK entry convention.
+- [ ] **Steam Deck and Proton detection** — find libraries under `~/.local/share/Steam` and SD-card mounts, and resolve `steamapps/compatdata/1465360/pfx/drive_c` prefixes.
+- [ ] **Proton DLL override helper** — explain or offer the required `WINEDLLOVERRIDES` launch option for Steam, for example `WINEDLLOVERRIDES="dinput8=n,b" %command%`. Guidance only; the app will not silently rewrite Steam configuration.
+- [ ] **Linux packaging** — AppImage or a Linux PyInstaller build, plus documented `python app.py` use.
+- [ ] **Handheld UI scaling** — larger controls and scaling for 7-inch screens such as the Steam Deck and ROG Ally.
+
+### Phase 3 — Custom mods and in-app tweaks (planned, mid term)
+
+- [ ] **Settings and graphics tweaker** — edit supported preset values before injection. This cannot replace mods that own their installer, such as Next Gen Graphics.
+- [ ] **Custom mod wizard** — map an unlisted ZIP or folder to a game target (`initial.pak`, `shared.pak`, `boot.pak`, `Sources\Bin`, and similar) and save it as a local preset.
+- [ ] **Remote preset rule sync** — optionally fetch community rule files from GitHub without reinstalling the app, with review before use.
+
+### Phase 4 — Advanced engine and integrity (planned, long term)
+
+- [ ] **XML smart-merge** — merge key/value differences instead of overwriting whole XML files, so more XML-based mods can coexist.
+- [ ] **Multi-profile management** — switchable mod profiles, for example vanilla co-op, realism, and graphics testing.
+- [ ] **Game update guard** — compare build data to detect a game update before allowing a restore or patch.
+
+### Community feedback
+
+Suggestions, bug reports, and preset rule submissions are welcome via GitHub Issues and Pull Requests. Include your game version, store (Steam, Epic, or Game Pass), and the affected mod version.
+
 ## Development checks
 
 ```text
