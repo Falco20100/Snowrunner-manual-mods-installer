@@ -66,7 +66,7 @@ Focus: launch stability, automatic folder detection, and accurate presets.
 - [x] **Preset catalog** — built-in rules for Real Life Mod, Spotter, Next Gen Gameplay, Next Gen Tire Inflation, Cargo Straps, Headlight Shadows, Serj4ever's QoL Pack, and others. Mods that ship their own patcher (Next Gen Graphics, LOD Optimizer, Gameplay Tweaks, Persistent mud) are linked to their author's instructions instead of being copied.
 - [ ] **Game path auto-detection** — locate installs from Steam, Epic Games Store, and PC Game Pass instead of asking for the game folder.
 - [ ] **Batch pre-flight validation** — show every collision point in the queue before anything is written. Today **Check queue** reports differing files within one batch, and existing game-file conflicts are found during install.
-- [ ] Support for Next Gen Tire Inflation, Next Gen Gameplay, No collision camera, Camera Clipping Fix, Flexible frames and soft suspension, SnowFlyer - Free Camera, Models Redesign, Invisible Wall Fixes, JUSTICE and addons for ALmost ALL, Immersive In-Cabin View & Head Out, De-RC-fication (Global truck rebalance), Snowrunner Prop Damage Rebalance, Snowrunner Tuning Shop, LOD Optimizer, lexo1000's Mods Collection and Revisual mods
+- [ ] Support for Next Gen Tire Inflation, Next Gen Gameplay, No collision camera, Camera Clipping Fix, Flexible frames and soft suspension, SnowFlyer - Free Camera, Models Redesign, Invisible Wall Fixes, JUSTICE and addons for ALmost ALL, Immersive In-Cabin View & Head Out, De-RC-fication (Global truck rebalance), Snowrunner Prop Damage Rebalance, Snowrunner Tuning Shop, LOD Optimizer, lexo1000's Mods Collection, Revisual mods, Nearby Repair, Repair Parts & Spare Wheel transfer
 
 ### Phase 2 — Linux and Steam Deck (planned, short term)
 
