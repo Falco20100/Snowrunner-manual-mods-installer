@@ -378,6 +378,8 @@ def _rewrite_pak(source: Path, dest: Path, entries):
         out.comment = original.comment
         original_keys = set()
         for info in original.infolist():
+            # ZipInfo.filename is normalized on Windows; retain the archive's exact name.
+            info.filename = info.orig_filename
             key = normalize(info.filename).lower()
             if key in original_keys:
                 raise InstallError(f"Duplicate path in {source.name}: {info.filename}")
@@ -392,7 +394,11 @@ def _rewrite_pak(source: Path, dest: Path, entries):
                     shutil.copyfileobj(src, dst, 1024 * 1024)
         for key, (name, data) in patches.items():
             if key not in seen:
-                out.writestr(name.replace("/", "\\"), data, compress_type=zipfile.ZIP_STORED)
+                archive_name = name.replace("/", "\\")
+                info = zipfile.ZipInfo(archive_name)
+                # ZipInfo normalizes native Windows separators; PAK entries need backslashes.
+                info.filename = archive_name
+                out.writestr(info, data, compress_type=zipfile.ZIP_STORED)
     # Check all modified bytes and all unchanged entries via CRC, not just whether the ZIP opens.
     with zipfile.ZipFile(dest) as out:
         bad = out.testzip()

@@ -12,7 +12,9 @@ from installer import InstallError, Job, backups, install, plan_jobs, restore_la
 def write_zip(path, files):
     with zipfile.ZipFile(path, "w") as z:
         for name, data in files.items():
-            z.writestr(name, data)
+            info = zipfile.ZipInfo(name)
+            info.filename = name
+            z.writestr(info, data)
 
 
 class InstallerTests(unittest.TestCase):
@@ -24,7 +26,7 @@ class InstallerTests(unittest.TestCase):
         self.bin.mkdir(parents=True)
         self.paks.mkdir(parents=True)
         (self.bin / "SnowRunner.exe").write_bytes(b"game")
-        write_zip(self.paks / "initial.pak", {"[media]\\truck.xml": b"original", "initial.cache_block": b"cache", "untouched": b"keep"})
+        write_zip(self.paks / "initial.pak", {"[media]\\truck.xml": b"original", "[media]\\unchanged.xml": b"keep path", "initial.cache_block": b"cache", "untouched": b"keep"})
         write_zip(self.paks / "shared.pak", {"[meshes]\\mesh": b"original mesh"})
 
     def tearDown(self):
@@ -41,12 +43,15 @@ class InstallerTests(unittest.TestCase):
         backup = install(str(self.root), [Job(rlm, "rlm")])
         self.assertNotEqual(backup.parent, self.paks)
         with zipfile.ZipFile(self.paks / "initial.pak") as z:
-            self.assertEqual(z.read("[media]\\truck.xml"), b"rlm")
-            self.assertEqual(z.read("initial.cache_block"), b"new cache")
-            self.assertEqual(z.read("untouched"), b"keep")
-            self.assertEqual(z.read("[strings]\\en.txt"), b"strings")
+            entries = {info.orig_filename: z.read(info) for info in z.infolist()}
+            self.assertEqual(entries["[media]\\truck.xml"], b"rlm")
+            self.assertEqual(entries["[media]\\unchanged.xml"], b"keep path")
+            self.assertEqual(entries["initial.cache_block"], b"new cache")
+            self.assertEqual(entries["untouched"], b"keep")
+            self.assertEqual(entries["[strings]\\en.txt"], b"strings")
         with zipfile.ZipFile(self.paks / "shared.pak") as z:
-            self.assertEqual(z.read("[meshes]\\mesh"), b"new mesh")
+            entries = {info.orig_filename: z.read(info) for info in z.infolist()}
+            self.assertEqual(entries["[meshes]\\mesh"], b"new mesh")
         restore_latest(str(self.root))
         self.assertEqual(before, [(self.paks / name).read_bytes() for name in ("initial.pak", "shared.pak")])
         self.assertEqual(backups(str(self.root)), [])
