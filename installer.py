@@ -546,6 +546,7 @@ def _rewrite_pak(source: Path, dest: Path, entries):
             if key in original_keys:
                 raise InstallError(f"Duplicate path in {source.name}: {info.filename}")
             original_keys.add(key)
+            external_attr = info.external_attr
             if key in patches:
                 data = patches[key][1]
                 out.writestr(info, data)
@@ -554,6 +555,9 @@ def _rewrite_pak(source: Path, dest: Path, entries):
                 # Copy streams to avoid loading game archives into memory.
                 with original.open(info) as src, out.open(info, "w", force_zip64=info.file_size >= 0x7fffffff) as dst:
                     shutil.copyfileobj(src, dst, 1024 * 1024)
+            # zipfile substitutes default permissions for zero; preserve the original
+            # in the central directory, which is written when the archive closes.
+            info.external_attr = external_attr
         for key, (name, data) in patches.items():
             if key not in seen:
                 archive_name = name.replace("/", "\\")

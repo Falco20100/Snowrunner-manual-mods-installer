@@ -101,6 +101,31 @@ class InstallerTests(unittest.TestCase):
         restore_latest(str(self.root))
         self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
 
+    def test_rewrite_preserves_zero_and_nonzero_external_attributes(self):
+        source = Path(self.tmp.name) / "source.pak"
+        dest = Path(self.tmp.name) / "rewritten.pak"
+        with zipfile.ZipFile(source, "w") as z:
+            for name, attrs in (("[media]\\replace.xml", 0), ("[media]\\keep.xml", 0), ("[media]\\permissions.xml", 0o100644 << 16)):
+                info = zipfile.ZipInfo(name)
+                info.filename = name
+                z.writestr(info, b"original")
+                # zipfile assigns default permissions when attrs is zero.
+                info.external_attr = attrs
+        with zipfile.ZipFile(source) as z:
+            before = {info.orig_filename: info.external_attr for info in z.infolist()}
+        self.assertEqual(before["[media]\\replace.xml"], 0)
+        self.assertEqual(before["[media]\\keep.xml"], 0)
+
+        installer._rewrite_pak(source, dest, [("[media]/replace.xml", b"replaced"), ("[media]/new.xml", b"new")])
+        with zipfile.ZipFile(dest) as z:
+            infos = {info.orig_filename: info for info in z.infolist()}
+            after = {name: info.external_attr for name, info in infos.items()}
+            self.assertEqual({name: after[name] for name in before}, before)
+            self.assertEqual(z.read(infos["[media]\\replace.xml"]), b"replaced")
+            self.assertEqual(z.read(infos["[media]\\keep.xml"]), b"original")
+            self.assertEqual(z.read(infos["[media]\\new.xml"]), b"new")
+            self.assertIsNone(z.testzip())
+
     def test_real_life_base_and_restore(self):
         rlm = self.package("rlm.zip", {"RLM/[media]/truck.xml": b"rlm", "RLM/[strings]/en.txt": b"strings", "RLM/initial.cache_block": b"new cache", "RLM/0. MUST-HAVE/[meshes]/mesh": b"new mesh", "RLM/C. GAMEPLAY MODES/initial.cache_block": b"optional"})
         before = [(self.paks / name).read_bytes() for name in ("initial.pak", "shared.pak")]
