@@ -409,6 +409,122 @@ def plan_jobs(jobs):
     return plan
 
 
+def _preflight(root, jobs):
+    """Inspect the queue once and return the validated plan and any issues."""
+    base, bin_dir, pak_dir = game_paths(root)
+    if not jobs:
+        raise InstallError("The queue is empty.")
+    issues = []
+    variants = {}
+    for job in jobs:
+        try:
+            job_plan = plan_jobs([job])
+        except (InstallError, OSError, zipfile.BadZipFile) as exc:
+            issues.append(f"{job.label or job.source}: {exc}")
+            continue
+        for key, (name, data) in job_plan.items():
+            variants.setdefault(key, []).append((job, name, data))
+
+    previous_batches = [(previous, json.loads((previous / "manifest.json").read_text(encoding="utf-8")))
+                        for previous in backups(str(base))]
+    spotter = any(job.mode == "spotter" for job in jobs)
+    nextgen_queued = any(job.mode in {"gameplay", "tire"}
+                         for job, _, _ in variants.get(("bin", "version.dll"), []))
+    version_path = bin_dir / "version.dll"
+    known_loader = False
+    if spotter and version_path.is_file():
+        current_hash = digest(version_path)
+        for _, manifest in previous_batches:
+            modes = set(manifest.get("modes", []))
+            # Older manifests have no per-loader provenance. Trust them only when
+            # every job in the batch was a Next Gen preset.
+            loader_hash = manifest.get("nextgen_loader_hash")
+            if "nextgen_loader_hash" not in manifest and modes and modes <= {"gameplay", "tire"}:
+                loader_hash = current_hash
+            if loader_hash == current_hash and any(
+                claim["group"] == "bin" and claim["path"].lower() == "version.dll" and claim["hash"] == current_hash
+                for claim in manifest.get("claims", [])
+            ):
+                known_loader = True
+                break
+        if not (known_loader or nextgen_queued):
+            issues.append("Spotter found an unknown existing version.dll. Follow the author instructions for your existing loader.")
+    if spotter and (bin_dir / "SnowMap.asi").exists():
+        issues.append("SnowMap.asi is installed. Disable it before installing Spotter to avoid two minimaps.")
+
+    loader_key = ("bin", "dinput8.dll")
+    loader_items = variants.get(loader_key, [])
+    omit_loader = bool(loader_items and (known_loader or nextgen_queued)
+                       and all(job.mode == "spotter" for job, _, _ in loader_items))
+    if omit_loader:
+        del variants[loader_key]
+
+    for (group, _), items in variants.items():
+        if len({data for _, _, data in items}) > 1:
+            owners = ", ".join(job.label or job.source for job, _, _ in items)
+            issues.append(f"Conflict: {group}/{items[0][1]} differs between {owners}.")
+
+    for previous, manifest in previous_batches:
+        for claim in manifest.get("claims", []):
+            key = (claim["group"], claim["path"].lower())
+            if key in variants and any(hashlib.sha256(data).hexdigest() != claim["hash"] for _, _, data in variants[key]):
+                issues.append(f"Previously installed mod also changes {claim['group']}/{claim['path']} (backup {previous.name}).")
+
+    bin_keys = {key for group, key in variants if group == "bin"}
+    for key in sorted(bin_keys):
+        parts = key.split("/")
+        for end in range(1, len(parts)):
+            parent = "/".join(parts[:end])
+            if parent in bin_keys:
+                issues.append(f"Conflict: bin/{parent} is both a file and a parent folder of bin/{key}.")
+
+    checked_archives = set()
+    for (group, key), items in variants.items():
+        if group == "bin":
+            for _, name, data in items:
+                try:
+                    target = _safe_target(bin_dir, name)
+                    blocked_parent = next((parent for parent in target.parents if parent != bin_dir and parent.exists() and not parent.is_dir()), None)
+                    if blocked_parent:
+                        issue = f"Not a directory: {blocked_parent}"
+                    elif target.exists() and not target.is_file():
+                        issue = f"Not a file: {target}"
+                    elif target.exists() and target.read_bytes() != data:
+                        issue = f"Existing file differs: {target}"
+                    else:
+                        continue
+                    if issue not in issues:
+                        issues.append(issue)
+                except (InstallError, OSError) as exc:
+                    issues.append(str(exc))
+        else:
+            target = pak_dir / group[4:]
+            if target in checked_archives:
+                continue
+            checked_archives.add(target)
+            if not target.is_file():
+                issues.append(f"Game archive not found: {target}")
+                continue
+            try:
+                with zipfile.ZipFile(target) as archive:
+                    seen = set()
+                    for info in archive.infolist():
+                        archive_key = normalize(info.orig_filename).lower()
+                        if archive_key in seen:
+                            issues.append(f"Duplicate path in {target.name}: {info.orig_filename}")
+                        seen.add(archive_key)
+            except (InstallError, OSError, zipfile.BadZipFile) as exc:
+                issues.append(f"Cannot inspect {target.name}: {exc}")
+    plan = {key: (items[-1][1], items[-1][2]) for key, items in variants.items()}
+    return base, bin_dir, pak_dir, plan, issues, omit_loader, nextgen_queued
+
+
+def preflight(root, jobs):
+    """Inspect the whole queue and existing targets without modifying game files."""
+    _, _, _, plan, issues, _, _ = _preflight(root, jobs)
+    return len(plan), issues
+
+
 def _safe_target(base: Path, rel: str):
     target = base.joinpath(*PurePosixPath(normalize(rel)).parts)
     if not target.resolve().is_relative_to(base.resolve()):
@@ -463,45 +579,17 @@ def _backup_root(base):
 
 def install(root, jobs, log=lambda _: None):
     assert_game_closed()
-    base, bin_dir, pak_dir = game_paths(root)
-    plan = plan_jobs(jobs)
-    # Also guard files installed in earlier batches, not only collisions in this queue.
-    previous_batches = backups(root)
-    for previous in previous_batches:
-        previous_manifest = json.loads((previous / "manifest.json").read_text(encoding="utf-8"))
-        for claim in previous_manifest.get("claims", []):
-            key = (claim["group"], claim["path"].lower())
-            if key in plan and hashlib.sha256(plan[key][1]).hexdigest() != claim["hash"]:
-                raise InstallError(f"Previously installed mod also changes {claim['group']}/{claim['path']}. Restore its batch or resolve the conflict manually; files are not automatically merged.")
+    base, bin_dir, pak_dir, plan, issues, omit_loader, nextgen_queued = _preflight(root, jobs)
+    if issues:
+        raise InstallError("Pre-flight stopped installation:\n" + "\n".join(issues))
     groups = {}
     for (group, _), item in plan.items():
         groups.setdefault(group, []).append(item)
-    # Spotter can use the known Next Gen ASI loader; do not replace a different loader.
-    spotter = any(j.mode == "spotter" for j in jobs)
-    nextgen_queued = any(j.mode in {"gameplay", "tire"} for j in jobs) and ("bin", "version.dll") in plan
-    known_loader = False
-    version_path = bin_dir / "version.dll"
-    if version_path.is_file():
-        current_hash = digest(version_path)
-        for previous in previous_batches:
-            old = json.loads((previous / "manifest.json").read_text(encoding="utf-8"))
-            if any(mode in {"gameplay", "tire"} for mode in old.get("modes", [])) and any(c["group"] == "bin" and c["path"].lower() == "version.dll" and c["hash"] == current_hash for c in old.get("claims", [])):
-                known_loader = True
-                break
-    nextgen = nextgen_queued or known_loader
-    if spotter and version_path.is_file() and not nextgen:
-        raise InstallError("Spotter found an unknown existing version.dll. Its loader cannot be identified safely; follow Spotter's author instructions for your existing loader.")
-    if spotter and nextgen and "bin" in groups:
-        # Only omit Spotter's loader if it is exclusively supplied by Spotter.
-        other_loader = any(j.mode != "spotter" and any(k == ("bin", "dinput8.dll") for k in plan_jobs([j])) for j in jobs)
-        if not other_loader:
-            groups["bin"] = [(p, d) for p, d in groups["bin"] if p.lower() != "dinput8.dll"]
-            log("Spotter: keeping the Next Gen ASI loader instead of installing Spotter's dinput8.dll.")
-    if spotter and (bin_dir / "SnowMap.asi").exists():
-        raise InstallError("SnowMap.asi is installed. Disable it before installing Spotter to avoid two minimaps.")
+    if omit_loader:
+        log("Spotter: keeping the Next Gen ASI loader instead of installing Spotter's dinput8.dll.")
     staged = []
     backup = _backup_root(base) / uuid.uuid4().hex
-    manifest = {"game": str(base), "status": "preparing", "created_ns": time.time_ns(), "changes": [], "modes": [job.mode for job in jobs], "claims": [{"group": group, "path": rel, "hash": hashlib.sha256(data).hexdigest()} for group, entries in groups.items() for rel, data in entries]}
+    manifest = {"game": str(base), "status": "preparing", "created_ns": time.time_ns(), "changes": [], "modes": [job.mode for job in jobs], "claims": [{"group": group, "path": rel, "hash": hashlib.sha256(data).hexdigest()} for group, entries in groups.items() for rel, data in entries], "nextgen_loader_hash": hashlib.sha256(plan[("bin", "version.dll")][1]).hexdigest() if nextgen_queued else None}
     try:
         backup.mkdir(parents=True)
         for group, entries in groups.items():

@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
-from installer import InstallError, Job, detect_game_installations, game_paths, install, plan_jobs, restore_latest
+from installer import InstallError, Job, detect_game_installations, game_paths, install, preflight, restore_latest
 
 
 # The catalog links to authors' pages; it never distributes or runs their files.
@@ -332,8 +332,13 @@ class App(tk.Tk):
         self.after(100, self._poll)
 
     def check(self):
-        jobs = list(self.jobs)
-        self.run_work(lambda log: f"{len(plan_jobs(jobs))} unique files; no duplicate-content conflicts found. Existing game-file conflicts are checked at install time.", "Queue checked.")
+        root, jobs = self.game.get(), list(self.jobs)
+        def check_queue(log):
+            count, issues = preflight(root, jobs)
+            if issues:
+                raise InstallError("Pre-flight found these issues:\n" + "\n".join(issues))
+            return f"{count} unique target files; no known conflicts found. Install rechecks before writing."
+        self.run_work(check_queue, "Queue checked.")
 
     def install(self):
         if not self.jobs:

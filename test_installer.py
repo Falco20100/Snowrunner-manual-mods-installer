@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import installer
-from installer import InstallError, Job, backups, install, plan_jobs, restore_latest
+from installer import InstallError, Job, backups, install, plan_jobs, preflight, restore_latest
 
 
 def write_zip(path, files):
@@ -119,6 +119,150 @@ class InstallerTests(unittest.TestCase):
         restore_latest(str(self.root))
         self.assertEqual(before, [(self.paks / name).read_bytes() for name in ("initial.pak", "shared.pak")])
         self.assertEqual(backups(str(self.root)), [])
+
+    def test_preflight_reports_multiple_conflicts_without_writes(self):
+        a = self.package("a.zip", {"[media]/truck.xml": b"a", "[media]/unchanged.xml": b"one"})
+        b = self.package("b.zip", {"[media]/truck.xml": b"b", "[media]/unchanged.xml": b"two"})
+        cargo = self.package("cargo.zip", {"version.dll": b"new loader", "mods/CargoStrap.dll": b"new mod"})
+        (self.bin / "version.dll").write_bytes(b"existing loader")
+        (self.bin / "mods").mkdir()
+        (self.bin / "mods" / "CargoStrap.dll").write_bytes(b"existing mod")
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        jobs = [Job(a, "pak:initial.pak"), Job(b, "pak:initial.pak"), Job(cargo, "cargo")]
+        count, issues = preflight(str(self.root), jobs)
+        text = "\n".join(issues)
+        self.assertEqual(count, 4)
+        for name in ("truck.xml", "unchanged.xml", "version.dll", "CargoStrap.dll"):
+            self.assertIn(name, text)
+        with self.assertRaisesRegex(InstallError, "Pre-flight stopped"):
+            install(str(self.root), jobs)
+        self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertFalse((self.root / "SnowRunnerManualBackups").exists())
+
+    def test_preflight_checks_previous_batch_and_missing_archive(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"first"})
+        second = self.package("second.zip", {"[media]/truck.xml": b"second"})
+        missing = self.package("missing.zip", {"[textures]/item": b"texture"})
+        install(str(self.root), [Job(first, "pak:initial.pak")])
+        _, issues = preflight(str(self.root), [Job(second, "pak:initial.pak"), Job(missing, "pak:boot.pak")])
+        text = "\n".join(issues)
+        self.assertIn("Previously installed mod", text)
+        self.assertIn("boot.pak", text)
+
+    def test_preflight_matches_spotter_loader_exception(self):
+        gameplay = self.package("gameplay.zip", {"Gauges.asi": b"gameplay", "version.dll": b"loader"})
+        install(str(self.root), [Job(gameplay, "gameplay")])
+        (self.bin / "dinput8.dll").write_bytes(b"unrelated")
+        spotter = self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"})
+        _, issues = preflight(str(self.root), [Job(spotter, "spotter")])
+        self.assertEqual(issues, [])
+        install(str(self.root), [Job(spotter, "spotter")])
+        self.assertEqual((self.bin / "dinput8.dll").read_bytes(), b"unrelated")
+
+    def test_preflight_reports_blocked_parent_and_duplicate_pak(self):
+        (self.bin / "mods").write_bytes(b"not a folder")
+        cargo = self.package("cargo.zip", {"version.dll": b"loader", "mods/CargoStrap.dll": b"mod"})
+        write_zip(self.paks / "shared.pak", {"[meshes]\\mesh": b"a", "[meshes]/mesh": b"b"})
+        meshes = self.package("meshes.zip", {"[meshes]/mesh": b"new"})
+        _, issues = preflight(str(self.root), [Job(cargo, "cargo"), Job(meshes, "pak:shared.pak")])
+        text = "\n".join(issues)
+        self.assertIn("Not a directory", text)
+        self.assertIn("Duplicate path", text)
+
+    def test_spotter_loader_exception_requires_nextgen_to_supply_version(self):
+        (self.bin / "version.dll").write_bytes(b"cargo loader")
+        (self.bin / "dinput8.dll").write_bytes(b"existing loader")
+        gameplay = self.package("gameplay.zip", {"Gauges.asi": b"gameplay"})
+        cargo = self.package("cargo.zip", {"version.dll": b"cargo loader"})
+        spotter = self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"})
+        jobs = [Job(gameplay, "gameplay"), Job(cargo, "cargo"), Job(spotter, "spotter")]
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        _, issues = preflight(str(self.root), jobs)
+        self.assertIn("unknown existing version.dll", "\n".join(issues))
+        self.assertIn("dinput8.dll", "\n".join(issues))
+        with self.assertRaisesRegex(InstallError, "unknown existing version.dll"):
+            install(str(self.root), jobs)
+        self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_mixed_batch_does_not_attribute_another_mods_loader_to_nextgen(self):
+        gameplay = self.package("gameplay.zip", {"Gauges.asi": b"gameplay"})
+        cargo = self.package("cargo.zip", {"version.dll": b"cargo loader"})
+        backup = install(str(self.root), [Job(gameplay, "gameplay"), Job(cargo, "cargo")])
+        spotter = self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"})
+        manifest_path = backup / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIsNone(manifest["nextgen_loader_hash"])
+        for legacy in (False, True):
+            if legacy:
+                del manifest["nextgen_loader_hash"]
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(legacy=legacy):
+                before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                _, issues = preflight(str(self.root), [Job(spotter, "spotter")])
+                self.assertIn("unknown existing version.dll", "\n".join(issues))
+                with self.assertRaisesRegex(InstallError, "unknown existing version.dll"):
+                    install(str(self.root), [Job(spotter, "spotter")])
+                self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_nextgen_loader_provenance_in_mixed_and_legacy_pure_batches(self):
+        gameplay = self.package("gameplay.zip", {"Gauges.asi": b"gameplay", "version.dll": b"nextgen"})
+        other = self.package("other.zip", {"other.dll": b"other"})
+        spotter = self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"})
+        backup = install(str(self.root), [Job(gameplay, "gameplay"), Job(other, "bin")])
+        (self.bin / "dinput8.dll").write_bytes(b"existing")
+        self.assertEqual(preflight(str(self.root), [Job(spotter, "spotter")])[1], [])
+        restore_latest(str(self.root))
+        backup = install(str(self.root), [Job(gameplay, "gameplay")])
+        manifest_path = backup / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del manifest["nextgen_loader_hash"]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertEqual(preflight(str(self.root), [Job(spotter, "spotter")])[1], [])
+
+    def test_omitted_spotter_loaders_do_not_conflict_with_each_other_or_prior_claims(self):
+        first = self.package("first.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"first"})
+        install(str(self.root), [Job(first, "spotter")])
+        gameplay = self.package("gameplay.zip", {"Gauges.asi": b"gameplay", "version.dll": b"nextgen"})
+        install(str(self.root), [Job(gameplay, "gameplay")])
+        second = self.package("second.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"second"})
+        third = self.package("third.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"third", "Spotter/options.json": b"{}"})
+        jobs = [Job(second, "spotter"), Job(third, "spotter")]
+        _, issues = preflight(str(self.root), jobs)
+        self.assertEqual(issues, [])
+        install(str(self.root), jobs)
+        self.assertEqual((self.bin / "dinput8.dll").read_bytes(), b"first")
+        self.assertEqual((self.bin / "Spotter" / "options.json").read_bytes(), b"{}")
+
+    def test_preflight_reports_queued_file_folder_collision(self):
+        first = self.package("first.zip", {"first.dll": b"first", "folder.ini": b"file"})
+        second = self.package("second.zip", {"second.dll": b"second", "folder.ini/config.json": b"config"})
+        jobs = [Job(first, "bin"), Job(second, "bin")]
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        _, issues = preflight(str(self.root), jobs)
+        self.assertIn("both a file and a parent folder", "\n".join(issues))
+        with self.assertRaisesRegex(InstallError, "both a file and a parent folder"):
+            install(str(self.root), jobs)
+        self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertFalse((self.root / "SnowRunnerManualBackups").exists())
+
+    def test_install_stages_the_preflight_plan_without_rereading_package(self):
+        package = self.package("mod.zip", {"mod.dll": b"validated"})
+        original_plan_jobs = installer.plan_jobs
+        def plan_once(jobs):
+            plan = original_plan_jobs(jobs)
+            write_zip(Path(package), {"mod.dll": b"changed after validation"})
+            return plan
+        with patch.object(installer, "plan_jobs", side_effect=plan_once) as planner:
+            install(str(self.root), [Job(package, "bin")])
+        self.assertEqual(planner.call_count, 1)
+        self.assertEqual((self.bin / "mod.dll").read_bytes(), b"validated")
+
+    def test_preflight_reports_invalid_package_and_other_conflicts(self):
+        a = self.package("a.zip", {"[media]/truck.xml": b"a"})
+        b = self.package("b.zip", {"[media]/truck.xml": b"b"})
+        _, issues = preflight(str(self.root), [Job("missing.zip", "bin"), Job(a, "pak:initial.pak"), Job(b, "pak:initial.pak")])
+        self.assertIn("missing.zip", "\n".join(issues))
+        self.assertIn("truck.xml", "\n".join(issues))
 
     def test_bulk_conflict_does_not_change_game(self):
         a = self.package("a.zip", {"[media]/truck.xml": b"a"})

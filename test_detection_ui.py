@@ -1,11 +1,17 @@
 """Focused detection UI tests with mocked Tk widgets and controlled worker timing."""
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import queue
 import sys
+import tempfile
 import types
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
+
+from installer import Job
 
 
 # The UI controller is exercised directly; widget creation is mocked so these
@@ -56,10 +62,13 @@ class Controller:
     show_detected = app.App.show_detected
     browse_game = app.App.browse_game
     _poll = app.App._poll
+    check = app.App.check
+    run_work = app.App.run_work
 
     def __init__(self):
         self.game = Variable()
         self.status = Variable()
+        self.jobs = []
         self.detecting = False
         self.busy = False
         self.events = queue.Queue()
@@ -237,6 +246,136 @@ class DetectionUITests(unittest.TestCase):
         self.ui.detect_game()
         self.assertEqual(len(self.threads), 1)
         self.finish_scan()
+
+
+class CheckQueueUITests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "SnowRunner"
+        self.bin = self.root / "Sources" / "Bin"
+        self.paks = self.root / "preload" / "paks" / "client"
+        self.bin.mkdir(parents=True)
+        self.paks.mkdir(parents=True)
+        (self.bin / "SnowRunner.exe").write_bytes(b"fake game")
+        self.write_zip(self.paks / "initial.pak", {"[media]/truck.xml": b"original"})
+        self.ui = Controller()
+        self.ui.game.set(str(self.root))
+        self.threads = []
+        def create_thread(**kwargs):
+            thread = DeferredThread(**kwargs)
+            self.threads.append(thread)
+            return thread
+        thread_patch = patch.object(app.threading, "Thread", side_effect=create_thread)
+        thread_patch.start()
+        self.addCleanup(thread_patch.stop)
+        self.info = Mock()
+        self.error = Mock()
+        for name, mock in (("showinfo", self.info), ("showerror", self.error)):
+            dialog_patch = patch.object(app.messagebox, name, mock, create=True)
+            dialog_patch.start()
+            self.addCleanup(dialog_patch.stop)
+
+    @staticmethod
+    def write_zip(path, entries):
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, content in entries.items():
+                archive.writestr(name, content)
+
+    def package(self, name, entries, mode):
+        path = Path(self.tmp.name) / name
+        self.write_zip(path, entries)
+        return Job(str(path), mode, name)
+
+    def snapshot_game(self):
+        return {str(path.relative_to(self.root)): (path.read_bytes() if path.is_file() else None)
+                for path in self.root.rglob("*")}
+
+    def check_queue(self):
+        before = self.snapshot_game()
+        self.ui.check()
+        self.assertTrue(self.ui.busy)
+        self.ui.install_button.configure.assert_called_with(state="disabled")
+        self.ui.restore_button.configure.assert_called_with(state="disabled")
+        self.threads[-1].finish()
+        self.ui._poll()
+        self.assertFalse(self.ui.busy)
+        self.ui.install_button.configure.assert_called_with(state="normal")
+        self.ui.restore_button.configure.assert_called_with(state="normal")
+        self.assertEqual(before, self.snapshot_game(), "Check queue modified the game fixture")
+
+    def test_success_reports_count_without_writes(self):
+        self.ui.jobs = [self.package("truck.zip", {"[media]/truck.xml": b"modified"}, "pak:initial.pak")]
+        self.check_queue()
+        self.info.assert_called_once_with("SnowRunner Manual Mod Installer",
+            "Queue checked.\n\n1 unique target files; no known conflicts found. Install rechecks before writing.")
+        self.error.assert_not_called()
+        self.assertEqual(self.ui.status.get(), "Queue checked.")
+
+    def test_multiple_conflicts_and_spotter_warnings_are_all_displayed(self):
+        (self.bin / "version.dll").write_bytes(b"unknown loader")
+        (self.bin / "SnowMap.asi").write_bytes(b"snowmap")
+        (self.bin / "dinput8.dll").write_bytes(b"existing loader")
+        self.ui.jobs = [
+            self.package("a.zip", {"[media]/truck.xml": b"a", "[media]/other.xml": b"a"}, "pak:initial.pak"),
+            self.package("b.zip", {"[media]/truck.xml": b"b", "[media]/other.xml": b"b"}, "pak:initial.pak"),
+            self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"new loader"}, "spotter"),
+        ]
+        self.check_queue()
+        self.info.assert_not_called()
+        self.error.assert_called_once()
+        title, message = self.error.call_args.args
+        self.assertEqual(title, "Operation stopped")
+        for text in ("Pre-flight found these issues:", "truck.xml", "other.xml",
+                     "unknown existing version.dll", "SnowMap.asi", "Existing file differs", "dinput8.dll"):
+            self.assertIn(text, message)
+        self.ui.log.assert_called_once_with("ERROR: " + message)
+        self.assertEqual(self.ui.status.get(), "Operation stopped. See Activity.")
+
+    def test_queued_nextgen_exempts_spotter_loader_but_not_other_conflicts(self):
+        (self.bin / "dinput8.dll").write_bytes(b"existing loader")
+        (self.bin / "Spotter.asi").write_bytes(b"existing spotter")
+        self.ui.jobs = [
+            self.package("gameplay.zip", {"Gauges.asi": b"gameplay", "version.dll": b"nextgen"}, "gameplay"),
+            self.package("spotter.zip", {"Spotter.asi": b"new spotter", "dinput8.dll": b"spotter loader"}, "spotter"),
+        ]
+        self.check_queue()
+        message = self.error.call_args.args[1]
+        self.assertIn("Spotter.asi", message)
+        self.assertNotIn("dinput8.dll", message)
+        self.info.assert_not_called()
+
+    def test_previously_installed_nextgen_exempts_spotter_loader(self):
+        loader = b"known nextgen loader"
+        (self.bin / "version.dll").write_bytes(loader)
+        (self.bin / "dinput8.dll").write_bytes(b"existing loader")
+        backup = self.root / "SnowRunnerManualBackups" / "nextgen"
+        backup.mkdir(parents=True)
+        (backup / "manifest.json").write_text(json.dumps({"status": "installed", "game": str(self.root), "modes": ["gameplay"],
+            "claims": [{"group": "bin", "path": "version.dll", "hash": hashlib.sha256(loader).hexdigest()}]}), encoding="utf-8")
+        self.ui.jobs = [self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"}, "spotter")]
+        self.check_queue()
+        self.info.assert_called_once()
+        self.assertIn("no known conflicts found", self.info.call_args.args[1])
+        self.error.assert_not_called()
+
+    def test_non_spotter_loader_is_not_exempt_when_nextgen_is_queued(self):
+        (self.bin / "dinput8.dll").write_bytes(b"existing loader")
+        self.ui.jobs = [
+            self.package("gameplay.zip", {"Gauges.asi": b"gameplay", "version.dll": b"nextgen"}, "gameplay"),
+            self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"}, "spotter"),
+            self.package("other.zip", {"dinput8.dll": b"other loader"}, "bin"),
+        ]
+        self.check_queue()
+        message = self.error.call_args.args[1]
+        self.assertIn("Conflict: bin/dinput8.dll", message)
+        self.assertIn("Existing file differs", message)
+        self.info.assert_not_called()
+
+    def test_empty_queue_reports_error_without_writes(self):
+        self.check_queue()
+        self.error.assert_called_once_with("Operation stopped", "The queue is empty.")
+        self.info.assert_not_called()
 
 
 if __name__ == "__main__":
