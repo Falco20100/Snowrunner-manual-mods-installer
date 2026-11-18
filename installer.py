@@ -10,10 +10,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
 
 
@@ -590,6 +593,120 @@ def _write_manifest(path, manifest):
         Path(name).unlink(missing_ok=True)
 
 
+_operation_locks = {}
+_operation_locks_guard = threading.Lock()
+
+
+@contextmanager
+def _operation_lock(base):
+    """Serialize cooperating threads and processes; OS locks release on exit."""
+    key = os.path.normcase(str(base))
+    with _operation_locks_guard:
+        lock = _operation_locks.setdefault(key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise InstallError("Cannot start: another installer operation is in progress.")
+    try:
+        with _process_lock(base):
+            yield
+    finally:
+        lock.release()
+
+
+@contextmanager
+def _process_lock(base):
+    if sys.platform == "win32":
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel.CreateMutexW.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        key = hashlib.sha256(os.path.normcase(str(base)).encode("utf-8")).hexdigest()
+        handle = kernel.CreateMutexW(None, False, "Global\\SnowRunnerManualInstaller-" + key)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        acquired = False
+        try:
+            result = kernel.WaitForSingleObject(handle, 0)
+            if result == 0x102:  # WAIT_TIMEOUT
+                raise InstallError("Cannot start: another installer operation is in progress.")
+            if result not in (0, 0x80):  # WAIT_OBJECT_0 or WAIT_ABANDONED
+                raise ctypes.WinError(ctypes.get_last_error())
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                kernel.ReleaseMutex(handle)
+            kernel.CloseHandle(handle)
+    else:
+        import fcntl
+        fd = os.open(base, os.O_RDONLY)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise InstallError("Cannot start: another installer operation is in progress.") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _serialized(operation):
+    @wraps(operation)
+    def wrapper(root, *args, **kwargs):
+        base, _, _ = game_paths(root)
+        with _operation_lock(base):
+            return operation(root, *args, **kwargs)
+    return wrapper
+
+
+def _validate_installed_manifest(base, manifest):
+    changes = manifest.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("invalid changes")
+    seen = set()
+    for item in changes:
+        if not isinstance(item, dict) or not isinstance(item.get("target"), str):
+            raise ValueError("invalid change")
+        relative = normalize(item["target"])
+        target = _safe_target(base, relative)
+        bin_dir = base / "Sources" / "Bin"
+        pak_dir = base / "preload" / "paks" / "client"
+        is_binary = target.is_relative_to(bin_dir) and target != bin_dir and target != bin_dir / "SnowRunner.exe"
+        is_pak = target.parent == pak_dir and target.name in {"initial.pak", "shared.pak", "boot.pak", "main_menu_textures.pak"}
+        if not (is_binary or is_pak):
+            raise ValueError("invalid target")
+        key = relative.lower()
+        if key in seen:
+            raise ValueError("duplicate target")
+        seen.add(key)
+        saved = item.get("backup")
+        if "backup" not in item or (saved is not None and (not isinstance(saved, str) or not saved.isascii() or not saved.isdecimal())):
+            raise ValueError("invalid backup filename")
+        if (is_pak and saved is None) or (is_binary and saved is not None):
+            raise ValueError("backup does not match target type")
+        for field in ("installed_hash", "backup_hash"):
+            value = item.get(field)
+            if field == "backup_hash" and value is None:
+                continue  # Legacy backups did not record a hash.
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"invalid {field}")
+    created = manifest.get("created_ns")
+    if created is not None and (not isinstance(created, int) or isinstance(created, bool)):
+        raise ValueError("invalid creation time")
+    for field in ("modes", "labels"):
+        if field in manifest and (not isinstance(manifest[field], list) or not all(isinstance(v, str) for v in manifest[field])):
+            raise ValueError(f"invalid {field}")
+    claims = manifest.get("claims", [])
+    if not isinstance(claims, list) or any(not isinstance(c, dict) or not all(isinstance(c.get(k), str) for k in ("group", "path", "hash")) for c in claims):
+        raise ValueError("invalid claims")
+
+
 def _check_unfinished(base):
     folder = _backup_root(base)
     if not folder.exists():
@@ -604,10 +721,13 @@ def _check_unfinished(base):
             status = manifest.get("status")
             if status not in {"installed", "restored", "aborted"}:
                 raise ValueError(f"unfinished status {status!r}")
-        except (OSError, ValueError, UnicodeError) as exc:
+            if status == "installed":
+                _validate_installed_manifest(base, manifest)
+        except (OSError, ValueError, UnicodeError, InstallError, TypeError) as exc:
             raise InstallError(f"Unresolved backup at {path}: {exc}. Close SnowRunner and review it manually before installing or uninstalling; no files were changed.") from exc
 
 
+@_serialized
 def install(root, jobs, log=lambda _: None):
     assert_game_closed()
     base, bin_dir, pak_dir, plan, issues, omit_loader, nextgen_queued = _preflight(root, jobs)
@@ -619,6 +739,7 @@ def install(root, jobs, log=lambda _: None):
     if omit_loader:
         log("Spotter: keeping the Next Gen ASI loader instead of installing Spotter's dinput8.dll.")
     staged = []
+    snapshot_hashes = {}
     backup = _backup_root(base) / uuid.uuid4().hex
     manifest = {"game": str(base), "status": "preparing", "created_ns": time.time_ns(), "changes": [], "modes": [job.mode for job in jobs], "labels": [job.label or Path(job.source).name or job.mode for job in jobs], "claims": [{"group": group, "path": rel, "hash": hashlib.sha256(data).hexdigest()} for group, entries in groups.items() for rel, data in entries], "nextgen_loader_hash": hashlib.sha256(plan[("bin", "version.dll")][1]).hexdigest() if nextgen_queued else None}
     backup.mkdir(parents=True)
@@ -649,17 +770,24 @@ def install(root, jobs, log=lambda _: None):
                 fd, tmp = tempfile.mkstemp(prefix=".srmi-", suffix=".tmp", dir=target.parent)
                 os.close(fd)
                 staged.append((target, Path(tmp), True))
-                _rewrite_pak(target, Path(tmp), entries)
+                saved = backup / str(len(staged) - 1)
+                original_hash = digest(target)
+                shutil.copy2(target, saved)
+                if digest(saved) != original_hash or not target.is_file() or digest(target) != original_hash:
+                    raise InstallError(f"Target changed during backup: {target}")
+                snapshot_hashes[target] = original_hash
+                _rewrite_pak(saved, Path(tmp), entries)
         if not staged:
             raise InstallError("Nothing to install; all selected binary files are already present.")
         for i, (target, tmp, existed) in enumerate(staged):
             saved = str(i) if existed else None
             original_hash = None
             if existed:
-                original_hash = digest(target)
-                shutil.copy2(target, backup / saved)
+                original_hash = snapshot_hashes[target]
                 if digest(backup / saved) != original_hash:
-                    raise InstallError(f"Backup verification failed: {target}")
+                    raise InstallError(f"Backup changed during installation: {backup / saved}")
+                if not target.is_file() or digest(target) != original_hash:
+                    raise InstallError(f"Target changed during installation: {target}")
             manifest["changes"].append({"target": str(target.relative_to(base)), "backup": saved, "backup_hash": original_hash, "installed_hash": digest(tmp)})
         manifest["status"] = "ready"
         _write_manifest(backup / "manifest.json", manifest)
@@ -669,19 +797,60 @@ def install(root, jobs, log=lambda _: None):
                     raise InstallError(f"Target changed during installation: {target}")
             elif target.exists():
                 raise InstallError(f"Target appeared during installation: {target}")
-        for target, tmp, existed in staged:
-            os.replace(tmp, target)
+        for (target, tmp, existed), item in zip(staged, manifest["changes"]):
+            if not tmp.is_file() or digest(tmp) != item["installed_hash"]:
+                raise InstallError(f"Staged file changed during installation: {tmp}")
+            if existed:
+                if not target.is_file() or digest(target) != item["backup_hash"]:
+                    raise InstallError(f"Target changed during installation: {target}")
+                os.replace(tmp, target)
+            else:
+                # A hard link creates a new target atomically without replacing an
+                # existing file, even if another process creates it after our check.
+                try:
+                    os.link(tmp, target)
+                except FileExistsError as exc:
+                    raise InstallError(f"Target appeared during installation: {target}") from exc
             committed.append(target)
         manifest["status"] = "installed"
         _write_manifest(backup / "manifest.json", manifest)
-    except Exception:
+    except Exception as original_error:
+        if committed:
+            manifest["status"] = "rolling_back"
+            try:
+                _write_manifest(backup / "manifest.json", manifest)
+            except Exception as exc:
+                raise InstallError(f"Installation failed: {original_error}. Could not record rollback: {exc}. No rollback was attempted; preserve and review {backup} manually.") from original_error
+        rollback_errors = []
         for index in reversed(range(len(committed))):
             target = committed[index]
             item = manifest["changes"][index]
-            if item["backup"] is None:
-                target.unlink(missing_ok=True)
-            else:
-                shutil.copy2(backup / item["backup"], target)
+            tmp_rollback = None
+            try:
+                if not target.is_file() or digest(target) != item["installed_hash"]:
+                    raise InstallError(f"target changed after installation: {target}")
+                if item["backup"] is None:
+                    target.unlink()
+                else:
+                    source = backup / item["backup"]
+                    if not source.is_file() or digest(source) != item["backup_hash"]:
+                        raise InstallError(f"backup changed: {source}")
+                    fd, name = tempfile.mkstemp(prefix=".srmi-rollback-", dir=target.parent)
+                    os.close(fd)
+                    tmp_rollback = Path(name)
+                    shutil.copy2(source, tmp_rollback)
+                    if digest(tmp_rollback) != item["backup_hash"]:
+                        raise InstallError(f"rollback copy failed verification: {source}")
+                    if not target.is_file() or digest(target) != item["installed_hash"]:
+                        raise InstallError(f"target changed during rollback: {target}")
+                    os.replace(tmp_rollback, target)
+            except Exception as exc:
+                rollback_errors.append(str(exc))
+            finally:
+                if tmp_rollback is not None:
+                    tmp_rollback.unlink(missing_ok=True)
+        if rollback_errors:
+            raise InstallError(f"Installation failed: {original_error}. Rollback failed: {'; '.join(rollback_errors)}. Preserve and review {backup} manually before further operations.") from original_error
         manifest["status"] = "aborted"
         _write_manifest(backup / "manifest.json", manifest)
         raise
@@ -721,6 +890,7 @@ def latest_batch(root):
     return backup, labels
 
 
+@_serialized
 def restore_latest(root, log=lambda _: None, expected_backup=None):
     assert_game_closed()
     base, _, _ = game_paths(root)
@@ -738,7 +908,7 @@ def restore_latest(root, log=lambda _: None, expected_backup=None):
                 raise InstallError(f"Cannot restore: {target} has changed since this install. Restore manually from {backup} after reviewing it.")
             saved = item["backup"]
             if saved is None:
-                staged.append((target, None))
+                staged.append((target, None, None))
                 continue
             if not isinstance(saved, str) or not saved.isdecimal():
                 raise InstallError(f"Invalid backup filename in {backup}.")
@@ -750,7 +920,7 @@ def restore_latest(root, log=lambda _: None, expected_backup=None):
                 raise InstallError(f"Backup file has changed: {source}. Restore manually after reviewing it.")
             fd, tmp = tempfile.mkstemp(prefix=".srmi-restore-", dir=target.parent)
             os.close(fd)
-            staged.append((target, Path(tmp)))
+            staged.append((target, Path(tmp), source_hash))
             shutil.copy2(source, tmp)
             if digest(Path(tmp)) != source_hash:
                 raise InstallError(f"Backup copy verification failed: {source}.")
@@ -760,15 +930,21 @@ def restore_latest(root, log=lambda _: None, expected_backup=None):
                 raise InstallError(f"Cannot restore: {target} changed while preparing the uninstall. Review it before retrying.")
         manifest["status"] = "restoring"
         _write_manifest(manifest_path, manifest)
-        for target, tmp in reversed(staged):
+        for (target, tmp, source_hash), item in reversed(list(zip(staged, manifest["changes"]))):
+            if not target.is_file() or digest(target) != item["installed_hash"]:
+                raise InstallError(f"Cannot restore: {target} changed during uninstall. Preserve {backup} and review manually.")
             if tmp is None:
                 target.unlink()
             else:
+                if not tmp.is_file() or digest(tmp) != source_hash:
+                    raise InstallError(f"Backup copy changed during uninstall: {tmp}. Preserve {backup} and review manually.")
+                if not target.is_file() or digest(target) != item["installed_hash"]:
+                    raise InstallError(f"Cannot restore: {target} changed during uninstall. Preserve {backup} and review manually.")
                 os.replace(tmp, target)
         manifest["status"] = "restored"
         _write_manifest(manifest_path, manifest)
     finally:
-        for _, tmp in staged:
+        for _, tmp, _ in staged:
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
     log(f"Restored the previous state from {backup}.")

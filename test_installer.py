@@ -330,6 +330,240 @@ installer.install(sys.argv[1], [installer.Job(sys.argv[2], "pak:initial.pak"), i
         self.assertEqual(target.read_bytes(), b"external change")
         self.assertEqual(json.loads((backup / "manifest.json").read_text(encoding="utf-8"))["status"], "installed")
 
+    def test_install_detects_change_during_pak_build(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        target = self.paks / "initial.pak"
+        rewrite = installer._rewrite_pak
+        def change_after_build(source, dest, entries):
+            rewrite(source, dest, entries)
+            target.write_bytes(b"external update")
+        with patch.object(installer, "_rewrite_pak", side_effect=change_after_build):
+            with self.assertRaisesRegex(InstallError, "changed"):
+                install(str(self.root), [Job(package, "pak:initial.pak")])
+        self.assertEqual(target.read_bytes(), b"external update")
+
+    def test_install_refuses_pak_snapshot_changed_during_build(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        target = self.paks / "initial.pak"
+        original = target.read_bytes()
+        rewrite = installer._rewrite_pak
+        def change_snapshot(source, dest, entries):
+            rewrite(source, dest, entries)
+            source.write_bytes(b"corrupt backup")
+        with patch.object(installer, "_rewrite_pak", side_effect=change_snapshot):
+            with self.assertRaisesRegex(InstallError, "Backup changed"):
+                install(str(self.root), [Job(package, "pak:initial.pak")])
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_install_checks_each_target_and_preserves_concurrent_change_on_rollback(self):
+        first = self.package("first.zip", {"first.dll": b"first"})
+        second = self.package("second.zip", {"second.dll": b"second"})
+        real_link = os.link
+        def change_after_first(src, dst, *args, **kwargs):
+            result = real_link(src, dst, *args, **kwargs)
+            if Path(dst) == self.bin / "first.dll":
+                (self.bin / "first.dll").write_bytes(b"external first")
+                (self.bin / "second.dll").write_bytes(b"external second")
+            return result
+        with patch.object(installer.os, "link", side_effect=change_after_first):
+            with self.assertRaises(InstallError):
+                install(str(self.root), [Job(first, "bin"), Job(second, "bin")])
+        self.assertEqual((self.bin / "first.dll").read_bytes(), b"external first")
+        self.assertEqual((self.bin / "second.dll").read_bytes(), b"external second")
+        record = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        self.assertEqual(json.loads(record.read_text())["status"], "rolling_back")
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            installer.latest_batch(str(self.root))
+
+    def test_install_failed_rollback_keeps_record_unresolved_and_backup_intact(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"mod"})
+        second = self.package("second.zip", {"[meshes]/mesh": b"mod"})
+        original = (self.paks / "initial.pak").read_bytes()
+        replace = os.replace
+        def fail_commit_and_rollback(src, dst):
+            if Path(dst) == self.paks / "shared.pak":
+                raise OSError("commit failed")
+            if Path(dst) == self.paks / "initial.pak" and Path(src).name.startswith(".srmi-rollback-"):
+                raise OSError("rollback failed")
+            return replace(src, dst)
+        with patch.object(installer.os, "replace", side_effect=fail_commit_and_rollback):
+            with self.assertRaisesRegex(InstallError, "rollback failed"):
+                install(str(self.root), [Job(first, "pak:initial.pak"), Job(second, "pak:shared.pak")])
+        record = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        manifest = json.loads(record.read_text())
+        self.assertEqual(manifest["status"], "rolling_back")
+        self.assertEqual((record.parent / manifest["changes"][0]["backup"]).read_bytes(), original)
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            restore_latest(str(self.root))
+
+    def test_uninstall_checks_each_target_after_restore_starts(self):
+        first = self.package("first.zip", {"first.dll": b"first"})
+        second = self.package("second.zip", {"second.dll": b"second"})
+        backup = install(str(self.root), [Job(first, "bin"), Job(second, "bin")])
+        writer = installer._write_manifest
+        def change_after_restoring(path, manifest):
+            writer(path, manifest)
+            if manifest["status"] == "restoring":
+                (self.bin / "first.dll").write_bytes(b"external change")
+        with patch.object(installer, "_write_manifest", side_effect=change_after_restoring):
+            with self.assertRaisesRegex(InstallError, "changed"):
+                restore_latest(str(self.root))
+        self.assertEqual((self.bin / "first.dll").read_bytes(), b"external change")
+        self.assertFalse((self.bin / "second.dll").exists())
+        self.assertEqual(json.loads((backup / "manifest.json").read_text())["status"], "restoring")
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            install(str(self.root), [Job(first, "bin")])
+
+    def test_malformed_completed_manifest_blocks_writes(self):
+        first = self.package("first.zip", {"first.dll": b"first"})
+        second = self.package("second.zip", {"second.dll": b"second"})
+        backup = install(str(self.root), [Job(first, "bin")])
+        record = backup / "manifest.json"
+        manifest = json.loads(record.read_text())
+        manifest["changes"] = "invalid"
+        record.write_text(json.dumps(manifest))
+        for operation in (lambda: install(str(self.root), [Job(second, "bin")]),
+                          lambda: restore_latest(str(self.root))):
+            with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+                operation()
+        self.assertEqual((self.bin / "first.dll").read_bytes(), b"first")
+        self.assertFalse((self.bin / "second.dll").exists())
+
+    def test_concurrent_installer_operations_are_rejected(self):
+        package = self.package("mod.zip", {"mod.dll": b"mod"})
+        with installer._operation_lock(self.root):
+            for operation in (lambda: install(str(self.root), [Job(package, "bin")]),
+                              lambda: restore_latest(str(self.root))):
+                with self.assertRaisesRegex(InstallError, "another.*operation"):
+                    operation()
+        self.assertFalse((self.bin / "mod.dll").exists())
+
+    def test_second_process_cannot_install_while_operation_locked(self):
+        package = self.package("mod.zip", {"mod.dll": b"mod"})
+        script = '''
+import sys
+import installer
+try:
+    installer.install(sys.argv[1], [installer.Job(sys.argv[2], "bin")])
+except installer.InstallError as exc:
+    print(exc)
+    sys.exit(23)
+sys.exit(0)
+'''
+        with installer._operation_lock(self.root):
+            result = subprocess.run([sys.executable, "-c", script, str(self.root), package],
+                                    capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("another installer operation", result.stdout)
+        self.assertFalse((self.bin / "mod.dll").exists())
+
+    def test_interruption_during_rollback_blocks_later_operations(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"mod"})
+        second = self.package("second.zip", {"[meshes]/mesh": b"mod"})
+        script = '''
+import os, sys
+from pathlib import Path
+import installer
+real_replace = os.replace
+root = Path(sys.argv[1]) / "preload" / "paks" / "client"
+def interrupt(src, dst):
+    if Path(dst) == root / "shared.pak":
+        raise OSError("fail commit")
+    if Path(dst) == root / "initial.pak" and Path(src).name.startswith(".srmi-rollback-"):
+        os._exit(23)
+    return real_replace(src, dst)
+installer.os.replace = interrupt
+installer.install(sys.argv[1], [installer.Job(sys.argv[2], "pak:initial.pak"), installer.Job(sys.argv[3], "pak:shared.pak")])
+'''
+        result = subprocess.run([sys.executable, "-c", script, str(self.root), first, second],
+                                capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 23, result.stderr)
+        record = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        self.assertEqual(json.loads(record.read_text())["status"], "rolling_back")
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            restore_latest(str(self.root))
+
+    def test_install_rejects_staged_file_changed_after_manifest(self):
+        package = self.package("mod.zip", {"mod.dll": b"mod"})
+        writer = installer._write_manifest
+        def change_staged(path, manifest):
+            writer(path, manifest)
+            if manifest["status"] == "ready":
+                next(self.bin.glob(".srmi-*")).write_bytes(b"external change")
+        with patch.object(installer, "_write_manifest", side_effect=change_staged):
+            with self.assertRaisesRegex(InstallError, "Staged file changed"):
+                install(str(self.root), [Job(package, "bin")])
+        self.assertFalse((self.bin / "mod.dll").exists())
+
+    def test_successful_rollback_restores_original_and_aborts(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"mod"})
+        second = self.package("second.zip", {"[meshes]/mesh": b"mod"})
+        original = (self.paks / "initial.pak").read_bytes()
+        replace = os.replace
+        def fail_second(src, dst):
+            if Path(dst) == self.paks / "shared.pak":
+                raise OSError("commit failed")
+            return replace(src, dst)
+        with patch.object(installer.os, "replace", side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, "commit failed"):
+                install(str(self.root), [Job(first, "pak:initial.pak"), Job(second, "pak:shared.pak")])
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), original)
+        record = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        self.assertEqual(json.loads(record.read_text())["status"], "aborted")
+
+    def test_rollback_does_not_overwrite_change_during_copy(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"mod"})
+        second = self.package("second.zip", {"[meshes]/mesh": b"mod"})
+        target = self.paks / "initial.pak"
+        replace = os.replace
+        copy = installer.shutil.copy2
+        def fail_second(src, dst):
+            if Path(dst) == self.paks / "shared.pak":
+                raise OSError("commit failed")
+            return replace(src, dst)
+        def change_target_during_rollback(src, dst, *args, **kwargs):
+            result = copy(src, dst, *args, **kwargs)
+            if Path(dst).name.startswith(".srmi-rollback-"):
+                target.write_bytes(b"external change")
+            return result
+        with patch.object(installer.os, "replace", side_effect=fail_second), \
+             patch.object(installer.shutil, "copy2", side_effect=change_target_during_rollback):
+            with self.assertRaisesRegex(InstallError, "target changed during rollback"):
+                install(str(self.root), [Job(first, "pak:initial.pak"), Job(second, "pak:shared.pak")])
+        self.assertEqual(target.read_bytes(), b"external change")
+        record = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        self.assertEqual(json.loads(record.read_text())["status"], "rolling_back")
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            restore_latest(str(self.root))
+
+    def test_uninstall_rejects_staged_backup_changed_after_validation(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        target = self.paks / "initial.pak"
+        before = target.read_bytes()
+        writer = installer._write_manifest
+        def change_staged(path, manifest):
+            writer(path, manifest)
+            if manifest["status"] == "restoring":
+                next(self.paks.glob(".srmi-restore-*")).write_bytes(b"corrupt copy")
+        with patch.object(installer, "_write_manifest", side_effect=change_staged):
+            with self.assertRaisesRegex(InstallError, "Backup copy changed"):
+                restore_latest(str(self.root))
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(json.loads((backup / "manifest.json").read_text())["status"], "restoring")
+
+    def test_malformed_pak_record_cannot_delete_archive(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        record = backup / "manifest.json"
+        manifest = json.loads(record.read_text())
+        manifest["changes"][0]["backup"] = None
+        record.write_text(json.dumps(manifest))
+        before = (self.paks / "initial.pak").read_bytes()
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            restore_latest(str(self.root))
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
+
     def test_legacy_backup_without_labels_or_hash_remains_restorable(self):
         package = self.package("mod.zip", {"[media]/truck.xml": b"modified"})
         original = (self.paks / "initial.pak").read_bytes()

@@ -387,6 +387,7 @@ class CheckQueueUITests(unittest.TestCase):
         backup = self.root / "SnowRunnerManualBackups" / "nextgen"
         backup.mkdir(parents=True)
         (backup / "manifest.json").write_text(json.dumps({"status": "installed", "game": str(self.root), "modes": ["gameplay"],
+            "changes": [{"target": "Sources/Bin/version.dll", "backup": None, "installed_hash": hashlib.sha256(loader).hexdigest()}],
             "claims": [{"group": "bin", "path": "version.dll", "hash": hashlib.sha256(loader).hexdigest()}]}), encoding="utf-8")
         self.ui.jobs = [self.package("spotter.zip", {"Spotter.asi": b"spotter", "dinput8.dll": b"spotter loader"}, "spotter")]
         self.check_queue()
