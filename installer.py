@@ -408,6 +408,7 @@ def plan_jobs(jobs):
 def _preflight(root, jobs):
     """Inspect the queue once and return the validated plan and any issues."""
     base, bin_dir, pak_dir = game_paths(root)
+    _check_unfinished(base)
     if not jobs:
         raise InstallError("The queue is empty.")
     issues = []
@@ -577,6 +578,36 @@ def _backup_root(base):
     return base / "SnowRunnerManualBackups"
 
 
+def _write_manifest(path, manifest):
+    fd, name = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _check_unfinished(base):
+    folder = _backup_root(base)
+    if not folder.exists():
+        return
+    for path in folder.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict) or manifest.get("game") != str(base):
+                raise ValueError("invalid game or manifest")
+            status = manifest.get("status")
+            if status not in {"installed", "restored", "aborted"}:
+                raise ValueError(f"unfinished status {status!r}")
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise InstallError(f"Unresolved backup at {path}: {exc}. Close SnowRunner and review it manually before installing or uninstalling; no files were changed.") from exc
+
+
 def install(root, jobs, log=lambda _: None):
     assert_game_closed()
     base, bin_dir, pak_dir, plan, issues, omit_loader, nextgen_queued = _preflight(root, jobs)
@@ -589,9 +620,11 @@ def install(root, jobs, log=lambda _: None):
         log("Spotter: keeping the Next Gen ASI loader instead of installing Spotter's dinput8.dll.")
     staged = []
     backup = _backup_root(base) / uuid.uuid4().hex
-    manifest = {"game": str(base), "status": "preparing", "created_ns": time.time_ns(), "changes": [], "modes": [job.mode for job in jobs], "claims": [{"group": group, "path": rel, "hash": hashlib.sha256(data).hexdigest()} for group, entries in groups.items() for rel, data in entries], "nextgen_loader_hash": hashlib.sha256(plan[("bin", "version.dll")][1]).hexdigest() if nextgen_queued else None}
+    manifest = {"game": str(base), "status": "preparing", "created_ns": time.time_ns(), "changes": [], "modes": [job.mode for job in jobs], "labels": [job.label or Path(job.source).name or job.mode for job in jobs], "claims": [{"group": group, "path": rel, "hash": hashlib.sha256(data).hexdigest()} for group, entries in groups.items() for rel, data in entries], "nextgen_loader_hash": hashlib.sha256(plan[("bin", "version.dll")][1]).hexdigest() if nextgen_queued else None}
+    backup.mkdir(parents=True)
+    _write_manifest(backup / "manifest.json", manifest)
+    committed = []
     try:
-        backup.mkdir(parents=True)
         for group, entries in groups.items():
             if group == "bin":
                 for rel, data in entries:
@@ -621,32 +654,42 @@ def install(root, jobs, log=lambda _: None):
             raise InstallError("Nothing to install; all selected binary files are already present.")
         for i, (target, tmp, existed) in enumerate(staged):
             saved = str(i) if existed else None
+            original_hash = None
             if existed:
+                original_hash = digest(target)
                 shutil.copy2(target, backup / saved)
-            manifest["changes"].append({"target": str(target.relative_to(base)), "backup": saved, "installed_hash": digest(tmp)})
+                if digest(backup / saved) != original_hash:
+                    raise InstallError(f"Backup verification failed: {target}")
+            manifest["changes"].append({"target": str(target.relative_to(base)), "backup": saved, "backup_hash": original_hash, "installed_hash": digest(tmp)})
         manifest["status"] = "ready"
-        (backup / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        committed = []
-        try:
-            for target, tmp, existed in staged:
-                os.replace(tmp, target)
-                committed.append(target)
-            manifest["status"] = "installed"
-            (backup / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        except Exception:
-            for index in reversed(range(len(committed))):
-                target = committed[index]
-                item = manifest["changes"][index]
-                if item["backup"] is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    shutil.copy2(backup / item["backup"], target)
-            raise
-        log(f"Installed {len(staged)} target(s). Backup: {backup}")
-        return backup
+        _write_manifest(backup / "manifest.json", manifest)
+        for (target, _, existed), item in zip(staged, manifest["changes"]):
+            if existed:
+                if not target.is_file() or digest(target) != item["backup_hash"]:
+                    raise InstallError(f"Target changed during installation: {target}")
+            elif target.exists():
+                raise InstallError(f"Target appeared during installation: {target}")
+        for target, tmp, existed in staged:
+            os.replace(tmp, target)
+            committed.append(target)
+        manifest["status"] = "installed"
+        _write_manifest(backup / "manifest.json", manifest)
+    except Exception:
+        for index in reversed(range(len(committed))):
+            target = committed[index]
+            item = manifest["changes"][index]
+            if item["backup"] is None:
+                target.unlink(missing_ok=True)
+            else:
+                shutil.copy2(backup / item["backup"], target)
+        manifest["status"] = "aborted"
+        _write_manifest(backup / "manifest.json", manifest)
+        raise
     finally:
         for _, tmp, _ in staged:
             tmp.unlink(missing_ok=True)
+    log(f"Installed {len(staged)} target(s). Backup: {backup}")
+    return backup
 
 
 def backups(root):
@@ -665,35 +708,68 @@ def backups(root):
     return [path for _, path in sorted(result, key=lambda item: item[0], reverse=True)]
 
 
-def restore_latest(root, log=lambda _: None):
-    assert_game_closed()
+def latest_batch(root):
+    """Return the latest completed batch and its display names without changing files."""
     base, _, _ = game_paths(root)
-    found = backups(root)
+    _check_unfinished(base)
+    found = backups(str(base))
     if not found:
         raise InstallError("No completed backup found for this game folder.")
     backup = found[0]
+    manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    labels = manifest.get("labels") or manifest.get("modes") or ["Unknown mods (older backup)"]
+    return backup, labels
+
+
+def restore_latest(root, log=lambda _: None, expected_backup=None):
+    assert_game_closed()
+    base, _, _ = game_paths(root)
+    backup, _ = latest_batch(str(base))
+    if expected_backup is not None and backup != Path(expected_backup):
+        raise InstallError("The latest batch changed after confirmation. Review it again before uninstalling.")
     manifest_path = backup / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    # Check every target before changing anything; do not undo changes made by other tools.
-    for item in manifest["changes"]:
-        target = _safe_target(base, item["target"])
-        if not target.is_file() or digest(target) != item["installed_hash"]:
-            raise InstallError(f"Cannot restore: {target} has changed since this install. Restore manually from {backup} after reviewing it.")
-        if item["backup"] is not None and not (backup / item["backup"]).is_file():
-            raise InstallError(f"Missing backup file in {backup}.")
-    for item in reversed(manifest["changes"]):
-        target = _safe_target(base, item["target"])
-        if item["backup"] is None:
-            target.unlink()
-        else:
+    staged = []
+    try:
+        # Validate all targets and prepare all replacement files before writing.
+        for item in manifest["changes"]:
+            target = _safe_target(base, item["target"])
+            if not target.is_file() or digest(target) != item["installed_hash"]:
+                raise InstallError(f"Cannot restore: {target} has changed since this install. Restore manually from {backup} after reviewing it.")
+            saved = item["backup"]
+            if saved is None:
+                staged.append((target, None))
+                continue
+            if not isinstance(saved, str) or not saved.isdecimal():
+                raise InstallError(f"Invalid backup filename in {backup}.")
+            source = _safe_target(backup, saved)
+            if not source.is_file():
+                raise InstallError(f"Missing backup file in {backup}.")
+            source_hash = digest(source)
+            if item.get("backup_hash") is not None and source_hash != item["backup_hash"]:
+                raise InstallError(f"Backup file has changed: {source}. Restore manually after reviewing it.")
             fd, tmp = tempfile.mkstemp(prefix=".srmi-restore-", dir=target.parent)
             os.close(fd)
-            try:
-                shutil.copy2(backup / item["backup"], tmp)
+            staged.append((target, Path(tmp)))
+            shutil.copy2(source, tmp)
+            if digest(Path(tmp)) != source_hash:
+                raise InstallError(f"Backup copy verification failed: {source}.")
+        for item in manifest["changes"]:
+            target = _safe_target(base, item["target"])
+            if not target.is_file() or digest(target) != item["installed_hash"]:
+                raise InstallError(f"Cannot restore: {target} changed while preparing the uninstall. Review it before retrying.")
+        manifest["status"] = "restoring"
+        _write_manifest(manifest_path, manifest)
+        for target, tmp in reversed(staged):
+            if tmp is None:
+                target.unlink()
+            else:
                 os.replace(tmp, target)
-            finally:
-                Path(tmp).unlink(missing_ok=True)
-    manifest["status"] = "restored"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest["status"] = "restored"
+        _write_manifest(manifest_path, manifest)
+    finally:
+        for _, tmp in staged:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
     log(f"Restored the previous state from {backup}.")
     return backup

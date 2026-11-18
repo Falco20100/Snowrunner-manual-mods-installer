@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
-from installer import InstallError, Job, detect_game_installations, game_paths, install, preflight, restore_latest
+from installer import InstallError, Job, detect_game_installations, game_paths, install, latest_batch, preflight, restore_latest
 
 
 # The catalog links to authors' pages; it never distributes or runs their files.
@@ -20,6 +20,7 @@ CATALOG = [
     ("Headlight Shadows", "https://mod.io/g/snowrunner/m/headlight-shadows", "headlights", "Binary payload under Sources/Bin. Check version-specific compatibility with Next Gen Graphics."),
     ("SnowRunner Cruise Control (gamepad)", "https://mod.io/g/snowrunner/m/snowrunner-cruise-control-gamepad-only-no-keybo", "external", "ReShade add-on; read its prerequisites and the author's install instructions."),
     ("Immersive In-Cabin View & Head Out", "https://mod.io/g/snowrunner/m/immersive-in-cabin-view-head-out", "pak:initial.pak", "Select its intended [media] payload. May conflict with other truck XML modifications."),
+    ("Camera Clipping Fix", "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix", "pak:initial.pak", "Original manual release: [media] into initial.pak. Already included in McKillem's Tweak Pack; can overlap No Collision Camera and other object XML mods. Check the author page for game compatibility."),
     ("Weather Overhaul", "https://mod.io/g/snowrunner/m/weather-overhaul", "external", "Select each intended option folder and target PAK as directed by the author. May overlap Next Gen Graphics and Effects Removal."),
     ("Models Redesign", "https://mod.io/g/snowrunner/m/models-redesign", "pak:main_menu_textures.pak", "Select the [textures] payload for main_menu_textures.pak."),
     ("Interface Refinement", "https://mod.io/g/snowrunner/m/interface-overhaul", "external", "Follow the author's target-archive and option instructions; select an extracted payload using a PAK mode."),
@@ -99,7 +100,7 @@ class App(tk.Tk):
         foot.grid(row=3, column=0, sticky="ew")
         foot.columnconfigure(0, weight=1)
         ttk.Label(foot, textvariable=self.status, wraplength=700).grid(row=0, column=0, sticky="w")
-        self.restore_button = ttk.Button(foot, text="Restore last install", command=self.restore)
+        self.restore_button = ttk.Button(foot, text="Uninstall last batch…", command=self.restore)
         self.restore_button.grid(row=0, column=1, padx=6)
         self.install_button = ttk.Button(foot, text="Install queue", command=self.install)
         self.install_button.grid(row=0, column=2)
@@ -350,10 +351,18 @@ class App(tk.Tk):
         self.run_work(lambda log: install(root, jobs, log), "Installation finished. Backups are outside the game PAK directory.")
 
     def restore(self):
-        if not messagebox.askyesno("Restore last install", "Restore the most recent install made by this tool? Later changes by other tools block restoration. Close SnowRunner first."):
+        if self.busy:
             return
         root = self.game.get()
-        self.run_work(lambda log: restore_latest(root, log), "Previous state restored.")
+        try:
+            backup, labels = latest_batch(root)
+        except (InstallError, OSError, ValueError) as exc:
+            messagebox.showerror("Cannot uninstall", str(exc))
+            return
+        names = "\n".join(f"• {label}" for label in labels)
+        if not messagebox.askyesno("Uninstall last batch", f"Close SnowRunner first. This restores the entire latest batch, not individual mods:\n\n{names}\n\nBackup: {backup}\n\nChanges made afterward by other tools block restoration. Continue?"):
+            return
+        self.run_work(lambda log: restore_latest(root, log, expected_backup=backup), "Last batch uninstalled; previous state restored.")
 
 
 if __name__ == "__main__":

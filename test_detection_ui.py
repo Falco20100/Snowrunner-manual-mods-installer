@@ -64,6 +64,7 @@ class Controller:
     _poll = app.App._poll
     check = app.App.check
     run_work = app.App.run_work
+    restore = app.App.restore
 
     def __init__(self):
         self.game = Variable()
@@ -246,6 +247,40 @@ class DetectionUITests(unittest.TestCase):
         self.ui.detect_game()
         self.assertEqual(len(self.threads), 1)
         self.finish_scan()
+
+
+class CatalogTests(unittest.TestCase):
+    def test_camera_clipping_fix_uses_manual_initial_pak_preset(self):
+        entries = [entry for entry in app.CATALOG if entry[0] == "Camera Clipping Fix"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0][1], "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix")
+        self.assertEqual(entries[0][2], "pak:initial.pak")
+
+
+class UninstallUITests(unittest.TestCase):
+    def test_uninstall_confirms_the_exact_latest_batch(self):
+        ui = Controller()
+        ui.game.set("fixture root")
+        ui.run_work = Mock()
+        backup = Path("fixture-backup")
+        with patch.object(app, "latest_batch", return_value=(backup, ["Mod A", "Mod B"])), \
+             patch.object(app.messagebox, "askyesno", return_value=True, create=True) as confirm, \
+             patch.object(app, "restore_latest") as restore:
+            ui.restore()
+            self.assertIn("Mod A", confirm.call_args.args[1])
+            self.assertIn("entire latest batch", confirm.call_args.args[1])
+            operation = ui.run_work.call_args.args[0]
+            operation(lambda _: None)
+            restore.assert_called_once_with("fixture root", unittest.mock.ANY, expected_backup=backup)
+
+    def test_uninstall_rejects_unresolved_backup_without_prompting(self):
+        ui = Controller()
+        with patch.object(app, "latest_batch", side_effect=app.InstallError("Unresolved backup")), \
+             patch.object(app.messagebox, "showerror", create=True) as error, \
+             patch.object(app.messagebox, "askyesno", create=True) as confirm:
+            ui.restore()
+            error.assert_called_once_with("Cannot uninstall", "Unresolved backup")
+            confirm.assert_not_called()
 
 
 class CheckQueueUITests(unittest.TestCase):

@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -36,6 +39,25 @@ class InstallerTests(unittest.TestCase):
         path = Path(self.tmp.name) / name
         write_zip(path, files)
         return str(path)
+
+    def test_camera_clipping_manual_payload_installs_and_restores(self):
+        target = "[media]/classes/models/big_watchtower_01.xml"
+        archive_name = target.replace("/", "\\")
+        write_zip(self.paks / "initial.pak", {archive_name: b"original", "untouched": b"keep"})
+        before = (self.paks / "initial.pak").read_bytes()
+        package = self.package("camera.zip", {"Readme.txt": b"instructions", target: b"camera fix"})
+        jobs = [Job(package, "pak:initial.pak", "Camera Clipping Fix")]
+        self.assertEqual(plan_jobs(jobs), {("pak:initial.pak", target): (target, b"camera fix")})
+        conflict = self.package("conflict.zip", {target: b"other"})
+        with self.assertRaisesRegex(InstallError, "Conflict"):
+            install(str(self.root), jobs + [Job(conflict, "pak:initial.pak")])
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
+        install(str(self.root), jobs)
+        with zipfile.ZipFile(self.paks / "initial.pak") as archive:
+            self.assertEqual(archive.read(archive_name), b"camera fix")
+            self.assertEqual(archive.read("untouched"), b"keep")
+        restore_latest(str(self.root))
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
 
     # The 1.5 paths are kept independent of the implementation as regression fixtures.
     effects_variants = {
@@ -177,6 +199,150 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(z.read(infos["[media]\\keep.xml"]), b"original")
             self.assertEqual(z.read(infos["[media]\\new.xml"]), b"new")
             self.assertIsNone(z.testzip())
+
+    def test_uninstall_batches_in_reverse_order_and_preserve_older_mods(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"first"})
+        second = self.package("second.zip", {"[media]/unchanged.xml": b"second"})
+        original = (self.paks / "initial.pak").read_bytes()
+        first_backup = install(str(self.root), [Job(first, "pak:initial.pak", "First mod")])
+        after_first = (self.paks / "initial.pak").read_bytes()
+        second_backup = install(str(self.root), [Job(second, "pak:initial.pak", "Second mod")])
+        self.assertEqual(installer.latest_batch(str(self.root)), (second_backup, ["Second mod"]))
+        with self.assertRaisesRegex(InstallError, "latest batch changed"):
+            restore_latest(str(self.root), expected_backup=first_backup)
+        restore_latest(str(self.root), expected_backup=second_backup)
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), after_first)
+        restore_latest(str(self.root), expected_backup=first_backup)
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), original)
+
+    def test_uninstall_removes_every_mod_in_the_latest_batch(self):
+        first = self.package("first.zip", {"one.dll": b"one"})
+        second = self.package("second.zip", {"two.dll": b"two"})
+        backup = install(str(self.root), [Job(first, "bin", "Mod one"), Job(second, "bin", "Mod two")])
+        self.assertEqual(installer.latest_batch(str(self.root)), (backup, ["Mod one", "Mod two"]))
+        restore_latest(str(self.root), expected_backup=backup)
+        self.assertFalse((self.bin / "one.dll").exists())
+        self.assertFalse((self.bin / "two.dll").exists())
+
+    def test_uninstall_refuses_corrupt_backup_before_any_changes(self):
+        package = self.package("mixed.zip", {"mod.dll": b"binary"})
+        pak = self.package("pak.zip", {"[media]/truck.xml": b"changed"})
+        backup = install(str(self.root), [Job(package, "bin"), Job(pak, "pak:initial.pak")])
+        manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+        saved = next(item["backup"] for item in manifest["changes"] if item["backup"] is not None)
+        (backup / saved).write_bytes(b"corrupted")
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        with self.assertRaisesRegex(InstallError, "Backup file has changed"):
+            restore_latest(str(self.root))
+        self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_unfinished_or_unreadable_backup_blocks_install_and_uninstall(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"first"})
+        install(str(self.root), [Job(first, "pak:initial.pak")])
+        candidate = self.package("candidate.zip", {"new.dll": b"new"})
+        unresolved = self.root / "SnowRunnerManualBackups" / "unfinished"
+        unresolved.mkdir()
+        manifest_path = unresolved / "manifest.json"
+        for content in (json.dumps({"game": str(self.root), "status": "ready"}),
+                        json.dumps({"game": str(self.root), "status": "restoring"}), "not json", None):
+            if content is None:
+                manifest_path.unlink(missing_ok=True)
+            else:
+                manifest_path.write_text(content, encoding="utf-8")
+            with self.subTest(content=content):
+                before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                for operation in (lambda: install(str(self.root), [Job(candidate, "bin")]), lambda: restore_latest(str(self.root))):
+                    with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+                        operation()
+                self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_process_interruption_during_install_blocks_later_operations(self):
+        first = self.package("first.zip", {"[media]/truck.xml": b"changed"})
+        second = self.package("second.zip", {"[meshes]/mesh": b"changed"})
+        before_shared = (self.paks / "shared.pak").read_bytes()
+        script = '''
+import os, sys
+from pathlib import Path
+import installer
+real_replace = os.replace
+initial = Path(sys.argv[1]) / "preload" / "paks" / "client" / "initial.pak"
+def interrupt(src, dst):
+    real_replace(src, dst)
+    if Path(dst) == initial:
+        os._exit(23)
+installer.os.replace = interrupt
+installer.install(sys.argv[1], [installer.Job(sys.argv[2], "pak:initial.pak"), installer.Job(sys.argv[3], "pak:shared.pak")])
+'''
+        result = subprocess.run([sys.executable, "-c", script, str(self.root), first, second],
+                                capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertEqual((self.paks / "shared.pak").read_bytes(), before_shared)
+        with zipfile.ZipFile(self.paks / "initial.pak") as archive:
+            self.assertEqual(archive.read("[media]\\truck.xml"), b"changed")
+        manifest_path = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["status"], "ready")
+        for operation in (lambda: restore_latest(str(self.root)), lambda: install(str(self.root), [Job(second, "pak:shared.pak")])):
+            with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+                operation()
+
+    def test_interrupted_restore_blocks_later_operations(self):
+        binary = self.package("mod.zip", {"mod.dll": b"mod"})
+        pak = self.package("pak.zip", {"[media]/truck.xml": b"changed"})
+        backup = install(str(self.root), [Job(pak, "pak:initial.pak"), Job(binary, "bin")])
+        real_replace = installer.os.replace
+        def interrupt_restore(src, dst):
+            if Path(dst) == self.paks / "initial.pak":
+                raise OSError("simulated restore failure")
+            return real_replace(src, dst)
+        with patch.object(installer.os, "replace", side_effect=interrupt_restore):
+            with self.assertRaisesRegex(OSError, "simulated restore failure"):
+                restore_latest(str(self.root))
+        self.assertFalse((self.bin / "mod.dll").exists())
+        self.assertEqual(json.loads((backup / "manifest.json").read_text(encoding="utf-8"))["status"], "restoring")
+        with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+            installer.latest_batch(str(self.root))
+
+    def test_install_refuses_target_changed_after_backup_before_replacement(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        target = self.paks / "initial.pak"
+        original_writer = installer._write_manifest
+        def mutate_after_ready(path, manifest):
+            original_writer(path, manifest)
+            if manifest["status"] == "ready":
+                target.write_bytes(b"external change")
+        with patch.object(installer, "_write_manifest", side_effect=mutate_after_ready):
+            with self.assertRaisesRegex(InstallError, "Target changed during installation"):
+                install(str(self.root), [Job(package, "pak:initial.pak")])
+        self.assertEqual(target.read_bytes(), b"external change")
+
+    def test_uninstall_refuses_target_changed_during_preparation(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        target = self.paks / "initial.pak"
+        original_copy = installer.shutil.copy2
+        def mutate_after_copy(src, dst, *args, **kwargs):
+            result = original_copy(src, dst, *args, **kwargs)
+            target.write_bytes(b"external change")
+            return result
+        with patch.object(installer.shutil, "copy2", side_effect=mutate_after_copy):
+            with self.assertRaisesRegex(InstallError, "changed while preparing"):
+                restore_latest(str(self.root))
+        self.assertEqual(target.read_bytes(), b"external change")
+        self.assertEqual(json.loads((backup / "manifest.json").read_text(encoding="utf-8"))["status"], "installed")
+
+    def test_legacy_backup_without_labels_or_hash_remains_restorable(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"modified"})
+        original = (self.paks / "initial.pak").read_bytes()
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        manifest_path = backup / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("labels")
+        for item in manifest["changes"]:
+            item.pop("backup_hash")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertEqual(installer.latest_batch(str(self.root)), (backup, ["pak:initial.pak"]))
+        restore_latest(str(self.root))
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), original)
 
     def test_real_life_base_and_restore(self):
         rlm = self.package("rlm.zip", {"RLM/[media]/truck.xml": b"rlm", "RLM/[strings]/en.txt": b"strings", "RLM/initial.cache_block": b"new cache", "RLM/0. MUST-HAVE/[meshes]/mesh": b"new mesh", "RLM/C. GAMEPLAY MODES/initial.cache_block": b"optional"})
