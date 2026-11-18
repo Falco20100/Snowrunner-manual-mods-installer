@@ -37,6 +37,70 @@ class InstallerTests(unittest.TestCase):
         write_zip(path, files)
         return str(path)
 
+    def test_effects_variants_select_only_requested_zip_or_named_folder(self):
+        variants = {
+            "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", "[textures]/pct/bokeh.pct"),
+            "effects:indicators": ("Indicators Removal", "boot.pak", "[textures]/pct/indicator.pct"),
+            "effects:truck": ("Truck SFX Removal", "initial.pak", "[media]/classes/particles/truck.xml"),
+            "effects:horn": ("Horn SFX Removal", "initial.pak", "[media]/classes/particles/horn.xml"),
+        }
+        files = {f"Effects Removal/{option}/to {pak}/{target}": mode.encode()
+                 for mode, (option, pak, target) in variants.items()}
+        package = self.package("effects.zip", files)
+        extracted = Path(self.tmp.name) / "extracted"
+        for name, data in files.items():
+            target = extracted / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        for mode, (option, pak, target) in variants.items():
+            for source in (package, str(extracted), str(extracted / "Effects Removal" / option)):
+                with self.subTest(mode=mode, source=source):
+                    self.assertEqual(plan_jobs([Job(source, mode)]),
+                                     {(f"pak:{pak}", target.lower()): (target, mode.encode())})
+
+    def test_effects_reject_missing_ambiguous_or_mismatched_options(self):
+        cases = {
+            "missing": {"Effects Removal/Indicators Removal/to boot.pak/[textures]/pct/x": b"x"},
+            "ambiguous": {"A/Bokeh Effect Removal/to boot.pak/[textures]/pct/x": b"x",
+                          "B/Bokeh Effect Removal/to boot.pak/[textures]/pct/y": b"y"},
+            "wrong archive": {"Bokeh Effect Removal/to initial.pak/[textures]/pct/x": b"x"},
+            "wrong marker": {"Bokeh Effect Removal/to boot.pak/[media]/pct/x": b"x"},
+            "mixed targets": {"Bokeh Effect Removal/to boot.pak/[textures]/pct/x": b"x",
+                              "Bokeh Effect Removal/to initial.pak/[media]/x": b"y"},
+            "misplaced": {"Bokeh Effect Removal/[textures]/pct/x": b"x"},
+        }
+        for label, files in cases.items():
+            with self.subTest(label=label):
+                package = self.package(label + ".zip", files)
+                with self.assertRaises(InstallError):
+                    plan_jobs([Job(package, "effects:bokeh")])
+        anonymous = Path(self.tmp.name) / "anonymous"
+        (anonymous / "to boot.pak" / "[textures]").mkdir(parents=True)
+        (anonymous / "to boot.pak" / "[textures]" / "x").write_bytes(b"x")
+        with self.assertRaises(InstallError):
+            plan_jobs([Job(str(anonymous), "effects:bokeh")])
+
+    def test_effects_install_conflicts_and_restore_on_synthetic_paks(self):
+        write_zip(self.paks / "boot.pak", {"[textures]\\pct\\bokeh.pct": b"original", "unchanged": b"keep"})
+        package = self.package("effects.zip", {
+            "Effects Removal/Bokeh Effect Removal/to boot.pak/[textures]/pct/bokeh.pct": b"bokeh",
+            "Effects Removal/Horn SFX Removal/to initial.pak/[media]/classes/particles/horn.xml": b"horn",
+        })
+        before = {name: (self.paks / name).read_bytes() for name in ("boot.pak", "initial.pak")}
+        jobs = [Job(package, "effects:bokeh"), Job(package, "effects:horn")]
+        conflict = self.package("conflict.zip", {"[textures]/pct/bokeh.pct": b"different"})
+        with self.assertRaises(InstallError):
+            install(str(self.root), jobs + [Job(conflict, "pak:boot.pak")])
+        self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
+        install(str(self.root), jobs)
+        with zipfile.ZipFile(self.paks / "boot.pak") as archive:
+            self.assertEqual(archive.read("[textures]\\pct\\bokeh.pct"), b"bokeh")
+            self.assertEqual(archive.read("unchanged"), b"keep")
+        with zipfile.ZipFile(self.paks / "initial.pak") as archive:
+            self.assertEqual(archive.read("[media]\\classes\\particles\\horn.xml"), b"horn")
+        restore_latest(str(self.root))
+        self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
+
     def test_real_life_base_and_restore(self):
         rlm = self.package("rlm.zip", {"RLM/[media]/truck.xml": b"rlm", "RLM/[strings]/en.txt": b"strings", "RLM/initial.cache_block": b"new cache", "RLM/0. MUST-HAVE/[meshes]/mesh": b"new mesh", "RLM/C. GAMEPLAY MODES/initial.cache_block": b"optional"})
         before = [(self.paks / name).read_bytes() for name in ("initial.pak", "shared.pak")]

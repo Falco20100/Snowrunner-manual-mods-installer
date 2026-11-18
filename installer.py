@@ -275,6 +275,50 @@ def _pak_payload(names, read, marker, allowed, root=None):
     return result
 
 
+EFFECTS_VARIANTS = {
+    "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", "[textures]"),
+    "effects:indicators": ("Indicators Removal", "boot.pak", "[textures]"),
+    "effects:truck": ("Truck SFX Removal", "initial.pak", "[media]"),
+    "effects:horn": ("Horn SFX Removal", "initial.pak", "[media]"),
+}
+
+
+def _effects_payload(source, names, read, mode):
+    option, pak, marker = EFFECTS_VARIANTS[mode]
+    source_path = Path(source).expanduser()
+    selected_option = source_path.is_dir() and source_path.name.lower() == option.lower()
+    roots = set()
+    for name in names:
+        parts = name.split("/")
+        for i, part in enumerate(parts):
+            if part.lower() == option.lower():
+                roots.add("/".join(parts[:i + 1]))
+    if selected_option:
+        roots.add("")
+    if len(roots) != 1:
+        raise InstallError(f"Effects Removal option {option} is missing or ambiguous. Select the original ZIP or the named option folder.")
+    root = next(iter(roots))
+    entries = {}
+    keys = set()
+    for name in names:
+        rel = _under(name, root)
+        if rel is None:
+            continue
+        parts = rel.split("/")
+        if not any(part.lower() in {"[media]", "[textures]", "[meshes]", "[strings]", "initial.cache_block"} for part in parts):
+            continue
+        if len(parts) < 3 or parts[0].lower() != f"to {pak}" or parts[1].lower() != marker:
+            raise InstallError(f"Unexpected Effects Removal payload for {option}: {rel}")
+        target = "/".join(parts[1:])
+        if target.lower() in keys:
+            raise InstallError(f"Duplicate Effects Removal payload path: {target}")
+        keys.add(target.lower())
+        entries[target] = read(name)
+    if not entries:
+        raise InstallError(f"No {marker} payload for {option} in to {pak}.")
+    return {f"pak:{pak}": entries}
+
+
 def _bin_payload(names, read, mode):
     # Choose a single payload root using the mod's actual entry point, not a documentation or installer folder.
     markers = {"spotter": "Spotter.asi", "gameplay": "Gauges.asi", "tire": "TirePressure.asi", "cargo": "version.dll", "headlights": "d3d11.dll"}
@@ -330,6 +374,8 @@ def plan_jobs(jobs):
             if len(mesh_roots) != 1:
                 raise InstallError("Real Life Mod MUST-HAVE [meshes] payload not found or ambiguous.")
             groups = {"pak:initial.pak": initial, "pak:shared.pak": _pak_payload(names, read, "[meshes]", {"[meshes]"}, next(iter(mesh_roots)))}
+        elif job.mode in EFFECTS_VARIANTS:
+            groups = _effects_payload(job.source, names, read, job.mode)
         elif job.mode.startswith("pak:"):
             pak = job.mode[4:]
             if pak not in {"initial.pak", "shared.pak", "boot.pak", "main_menu_textures.pak"}:

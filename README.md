@@ -30,17 +30,18 @@ Build the EXE on Windows; PyInstaller does not cross-compile from Linux. The rep
 4. Use **Check queue** to detect differing files in the same batch, then **Install queue**. The app checks existing file conflicts during installation. Follow messages in **Activity**. Do not launch the game until it finishes.
 5. Start the game and verify each mod. Game updates and store file verification may remove or invalidate mods.
 
-PAK modes need an actual payload such as `[media]`, `[strings]`, `[meshes]`, `[textures]` or `initial.cache_block`, not a full replacement PAK. If an archive contains multiple variants, extract it and select the particular option folder specified by the author. ZIP and extracted folders are supported; extract RAR and 7z using a trusted archive tool first. Never select an untrusted mod executable; this app does not execute downloaded mods or their installers.
+PAK modes need an actual payload such as `[media]`, `[strings]`, `[meshes]`, `[textures]` or `initial.cache_block`, not a full replacement PAK. Unless a dedicated catalog preset handles its variants, extract multi-option archives and select the particular option folder specified by the author. ZIP and extracted folders are supported; extract RAR and 7z using a trusted archive tool first. Never select an untrusted mod executable; this app does not execute downloaded mods or their installers.
 
 ### Catalog and compatibility
 
 - **Real Life Mod**: the dedicated mode applies the base `[media]`, `[strings]`, and `initial.cache_block` to `initial.pak` and the `0. MUST-HAVE/[meshes]` to `shared.pak`. Optional RLM variants are not automatically applied. Check that the downloaded RLM release matches your game.
 - **Spotter, Next Gen Gameplay/Tire Inflation, Cargo Straps and Headlight Shadows**: dedicated modes copy their recognized binary layouts to `Sources\Bin`. If Spotter is selected alongside a Next Gen loader in the same queue, or with a matching loader previously installed by this app, its bundled `dinput8.dll` is omitted as described by Spotter's author. An unknown existing `version.dll` is not identified automatically; follow the author instructions for that setup. Spotter's current releases are Steam-only. SnowMap must be disabled separately.
 - **Next Gen Graphics / skies**, **LOD Optimizer**, **Gameplay Tweaks**, and **Persistent mud and realism** use their authors' own patchers/installers; open the catalog page and follow those instructions. Next Gen Graphics requires its separate sky pack and should be applied last. The app does not run these tools for you.
-- Weather Overhaul, Interface Refinement and Effects Removal can contain several options or target archives. Follow the author instructions, extract the intended option, and add it through the relevant PAK mode. The library links to them but does not choose their options for you.
+- **Effects Removal**: choose Bokeh, Indicators, Truck SFX or Horn SFX in the catalog. Each choice accepts the original Effects Removal 1.5 ZIP or the named extracted option folder and selects only that option. Bokeh and Indicators target `boot.pak`; Truck SFX and Horn SFX target `initial.pak`. Bokeh is already included in Weather Overhaul, and Indicators is already included in Gameplay Tweaks using a different method. Check the [author's current instructions](https://mod.io/g/snowrunner/m/effects-removal) and compatibility before installing.
+- **Weather Overhaul and Interface Refinement** can contain several options or target archives. Follow the author instructions, extract the intended option, and add it through the relevant PAK mode. The library links to them but does not choose their options for you.
 - In-Cabin View, Models Redesign and Serj4ever's QoL Pack have PAK payload presets. SnowRunner Cruise Control is a ReShade add-on: follow its author page.
 
-**Compatibility is not guaranteed.** Many mods change the same files or ship different `version.dll`, `dinput8.dll`, `dxgi.dll` or ReShade settings. Differing files in the same batch, or PAK entries previously installed by this app, are blocked; differing existing binary files are never overwritten. The app cannot detect overlaps already applied by other tools inside a PAK, merge XML, determine loader identity, select optional variants, or ensure mods work together in the game. Resolve such conflicts using the authors' guidance; do not rename or overwrite a loader blindly. The catalog is an aid, not an endorsement or compatibility guarantee.
+**Compatibility is not guaranteed.** Many mods change the same files or ship different `version.dll`, `dinput8.dll`, `dxgi.dll` or ReShade settings. Differing files in the same batch, or PAK entries previously installed by this app, are blocked; differing existing binary files are never overwritten. The app cannot detect overlaps already applied by other tools inside a PAK, merge XML, determine loader identity, select arbitrary optional variants, or ensure mods work together in the game. Resolve such conflicts using the authors' guidance; do not rename or overwrite a loader blindly. The catalog is an aid, not an endorsement or compatibility guarantee.
 
 The referenced [EquDevel installer](https://github.com/equdevel/SnowRunner_mod_installer) and [Nexus listing](https://www.nexusmods.com/snowrunner/mods/35) focus on mod.io subscriptions. This app is independent and handles local manual downloads instead; it does not manage mod.io subscriptions or bypass mod hosting or login requirements.
 
@@ -66,6 +67,7 @@ Focus: launch stability, automatic folder detection, and accurate presets.
 - [x] **Preset catalog** — built-in rules for Real Life Mod, Spotter, Next Gen Gameplay, Next Gen Tire Inflation, Cargo Straps, Headlight Shadows, Serj4ever's QoL Pack, and others. Mods that ship their own patcher (Next Gen Graphics, LOD Optimizer, Gameplay Tweaks, Persistent mud) are linked to their author's instructions instead of being copied.
 - [x] **Game path auto-detection** — discover valid Steam, Epic Games Store, and PC Game Pass installs where accessible, with manual selection as a fallback.
 - [ ] **Batch pre-flight validation** — show every collision point in the queue before anything is written. Today **Check queue** reports differing files within one batch, and existing game-file conflicts are found during install.
+- [ ] **Additional mod research and support** — investigate No collision camera, Camera Clipping Fix, Flexible frames and soft suspension, SnowFlyer - Free Camera, Invisible Wall Fixes, JUSTICE and addons for ALmost ALL, De-RC-fication, Snowrunner Prop Damage Rebalance, Snowrunner Tuning Shop, lexo1000's Mods Collection, Revisual mods, Nearby Repair, and Repair Parts & Spare Wheel transfer. Next Gen Tire Inflation, Next Gen Gameplay, Models Redesign, and Immersive In-Cabin View already have presets; LOD Optimizer requires its own tool.
 
 ### Phase 2 — Linux and Steam Deck (planned, short term)
 
@@ -96,7 +98,7 @@ Suggestions, bug reports, and preset rule submissions are welcome via GitHub Iss
 ## Development checks
 
 ```text
-python -m unittest -v test_installer
+python -m unittest -v test_installer test_detection_ui
 python -m py_compile app.py installer.py
 ```
 
