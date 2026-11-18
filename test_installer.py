@@ -37,67 +37,119 @@ class InstallerTests(unittest.TestCase):
         write_zip(path, files)
         return str(path)
 
+    # The 1.5 paths are kept independent of the implementation as regression fixtures.
+    effects_variants = {
+        "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", (
+            "[textures]/pct/env_camera_bokeh.pct", "[textures]/pct/sfx_flare_sky__s_d.pct")),
+        "effects:indicators": ("Indicators Removal", "boot.pak", (
+            "[textures]/pct/gui_block__d_a.pct", "[textures]/pct/gui_zone_dash.pct")),
+        "effects:truck": ("Truck SFX Removal", "initial.pak", (
+            "[media]/classes/particles/engine_fire.xml", "[media]/classes/particles/engine_sparks.xml",
+            "[media]/classes/particles/intake.xml", "[media]/classes/particles/intake_distortion.xml")),
+        "effects:horn": ("Horn SFX Removal", "initial.pak", (
+            "[media]/classes/particles/honk_distortion.xml", "[media]/classes/particles/honk_dust.xml")),
+    }
+
+    def effects_files(self, mode):
+        option, pak, targets = self.effects_variants[mode]
+        return {f"Effects Removal/{option}/to {pak}/{target}": mode.encode() for target in targets}
+
     def test_effects_variants_select_only_requested_zip_or_named_folder(self):
-        variants = {
-            "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", "[textures]/pct/bokeh.pct"),
-            "effects:indicators": ("Indicators Removal", "boot.pak", "[textures]/pct/indicator.pct"),
-            "effects:truck": ("Truck SFX Removal", "initial.pak", "[media]/classes/particles/truck.xml"),
-            "effects:horn": ("Horn SFX Removal", "initial.pak", "[media]/classes/particles/horn.xml"),
-        }
-        files = {f"Effects Removal/{option}/to {pak}/{target}": mode.encode()
-                 for mode, (option, pak, target) in variants.items()}
+        files = {}
+        for mode in self.effects_variants:
+            files.update(self.effects_files(mode))
         package = self.package("effects.zip", files)
         extracted = Path(self.tmp.name) / "extracted"
         for name, data in files.items():
             target = extracted / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-        for mode, (option, pak, target) in variants.items():
+        for mode, (option, pak, targets) in self.effects_variants.items():
             for source in (package, str(extracted), str(extracted / "Effects Removal" / option)):
                 with self.subTest(mode=mode, source=source):
                     self.assertEqual(plan_jobs([Job(source, mode)]),
-                                     {(f"pak:{pak}", target.lower()): (target, mode.encode())})
+                                     {(f"pak:{pak}", target): (target, mode.encode()) for target in targets})
 
-    def test_effects_reject_missing_ambiguous_or_mismatched_options(self):
+    def test_effects_reject_incomplete_or_mislabeled_variants(self):
+        for mode in self.effects_variants:
+            files = self.effects_files(mode)
+            files.pop(next(iter(files)))
+            with self.subTest(mode=mode, case="missing file"):
+                with self.assertRaisesRegex(InstallError, "supported 1.5 layout"):
+                    plan_jobs([Job(self.package("incomplete.zip", files), mode)])
+            files = self.effects_files(mode)
+            option, pak, _ = self.effects_variants[mode]
+            other_mode = "effects:indicators" if mode == "effects:bokeh" else "effects:bokeh"
+            other_target = self.effects_variants[other_mode][2][0]
+            files[f"Effects Removal/{option}/to {pak}/{other_target}"] = b"wrong variant"
+            with self.subTest(mode=mode, case="mixed variant"):
+                with self.assertRaisesRegex(InstallError, "supported 1.5 layout"):
+                    plan_jobs([Job(self.package("mixed.zip", files), mode)])
+            files.pop(next(iter(files)))
+            with self.subTest(mode=mode, case="substituted file"):
+                with self.assertRaisesRegex(InstallError, "supported 1.5 layout"):
+                    plan_jobs([Job(self.package("substituted.zip", files), mode)])
+
+    def test_effects_paths_are_case_insensitive_and_duplicate_files_are_rejected(self):
+        files = self.effects_files("effects:bokeh")
+        upper = {name.upper(): data for name, data in files.items()}
+        expected = self.effects_variants["effects:bokeh"][2]
+        self.assertEqual(set(plan_jobs([Job(self.package("uppercase.zip", upper), "effects:bokeh")])),
+                         {("pak:boot.pak", target) for target in expected})
+        duplicate = dict(files)
+        name = next(iter(files))
+        duplicate[name.upper()] = b"duplicate"
+        with self.assertRaises(InstallError):
+            plan_jobs([Job(self.package("duplicate.zip", duplicate), "effects:bokeh")])
+
+    def test_effects_reject_ambiguous_or_changed_layouts(self):
+        good = self.effects_files("effects:bokeh")
         cases = {
-            "missing": {"Effects Removal/Indicators Removal/to boot.pak/[textures]/pct/x": b"x"},
-            "ambiguous": {"A/Bokeh Effect Removal/to boot.pak/[textures]/pct/x": b"x",
-                          "B/Bokeh Effect Removal/to boot.pak/[textures]/pct/y": b"y"},
-            "wrong archive": {"Bokeh Effect Removal/to initial.pak/[textures]/pct/x": b"x"},
-            "wrong marker": {"Bokeh Effect Removal/to boot.pak/[media]/pct/x": b"x"},
-            "mixed targets": {"Bokeh Effect Removal/to boot.pak/[textures]/pct/x": b"x",
-                              "Bokeh Effect Removal/to initial.pak/[media]/x": b"y"},
-            "misplaced": {"Bokeh Effect Removal/[textures]/pct/x": b"x"},
+            "missing option": self.effects_files("effects:indicators"),
+            "ambiguous": {**{f"A/{name}": data for name, data in good.items()},
+                          **{f"B/{name}": data for name, data in good.items()}},
+            "wrong archive": {name.replace("to boot.pak", "to initial.pak"): data for name, data in good.items()},
+            "wrong marker": {name.replace("[textures]", "[media]"): data for name, data in good.items()},
+            "extra file": {**good, "Effects Removal/Bokeh Effect Removal/to boot.pak/unknown/file": b"x"},
+            "renamed variant": {name.replace("Bokeh Effect Removal", "Indicators Removal"): data for name, data in good.items()},
         }
         for label, files in cases.items():
             with self.subTest(label=label):
-                package = self.package(label + ".zip", files)
                 with self.assertRaises(InstallError):
-                    plan_jobs([Job(package, "effects:bokeh")])
+                    plan_jobs([Job(self.package(label + ".zip", files), "effects:bokeh")])
         anonymous = Path(self.tmp.name) / "anonymous"
-        (anonymous / "to boot.pak" / "[textures]").mkdir(parents=True)
-        (anonymous / "to boot.pak" / "[textures]" / "x").write_bytes(b"x")
+        for name, data in good.items():
+            target = anonymous / name.split("Bokeh Effect Removal/", 1)[1]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
         with self.assertRaises(InstallError):
             plan_jobs([Job(str(anonymous), "effects:bokeh")])
+        invalid = self.package("invalid-layout.zip", cases["extra file"])
+        before = (self.paks / "initial.pak").read_bytes()
+        _, issues = preflight(str(self.root), [Job(invalid, "effects:bokeh")])
+        self.assertIn("supported 1.5 layout", "\n".join(issues))
+        with self.assertRaisesRegex(InstallError, "supported 1.5 layout"):
+            install(str(self.root), [Job(invalid, "effects:bokeh")])
+        self.assertEqual(before, (self.paks / "initial.pak").read_bytes())
+        self.assertFalse((self.root / "SnowRunnerManualBackups").exists())
 
     def test_effects_install_conflicts_and_restore_on_synthetic_paks(self):
-        write_zip(self.paks / "boot.pak", {"[textures]\\pct\\bokeh.pct": b"original", "unchanged": b"keep"})
-        package = self.package("effects.zip", {
-            "Effects Removal/Bokeh Effect Removal/to boot.pak/[textures]/pct/bokeh.pct": b"bokeh",
-            "Effects Removal/Horn SFX Removal/to initial.pak/[media]/classes/particles/horn.xml": b"horn",
-        })
+        bokeh = "[textures]/pct/env_camera_bokeh.pct"
+        horn = "[media]/classes/particles/honk_distortion.xml"
+        write_zip(self.paks / "boot.pak", {bokeh.replace("/", "\\"): b"original", "unchanged": b"keep"})
+        package = self.package("effects.zip", {**self.effects_files("effects:bokeh"), **self.effects_files("effects:horn")})
         before = {name: (self.paks / name).read_bytes() for name in ("boot.pak", "initial.pak")}
         jobs = [Job(package, "effects:bokeh"), Job(package, "effects:horn")]
-        conflict = self.package("conflict.zip", {"[textures]/pct/bokeh.pct": b"different"})
-        with self.assertRaises(InstallError):
+        conflict = self.package("conflict.zip", {bokeh: b"different"})
+        with self.assertRaisesRegex(InstallError, "Conflict"):
             install(str(self.root), jobs + [Job(conflict, "pak:boot.pak")])
         self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
         install(str(self.root), jobs)
         with zipfile.ZipFile(self.paks / "boot.pak") as archive:
-            self.assertEqual(archive.read("[textures]\\pct\\bokeh.pct"), b"bokeh")
+            self.assertEqual(archive.read(bokeh.replace("/", "\\")), b"effects:bokeh")
             self.assertEqual(archive.read("unchanged"), b"keep")
         with zipfile.ZipFile(self.paks / "initial.pak") as archive:
-            self.assertEqual(archive.read("[media]\\classes\\particles\\horn.xml"), b"horn")
+            self.assertEqual(archive.read(horn.replace("/", "\\")), b"effects:horn")
         restore_latest(str(self.root))
         self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
 

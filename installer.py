@@ -275,48 +275,44 @@ def _pak_payload(names, read, marker, allowed, root=None):
     return result
 
 
+# Paths from the author's Effects Removal 1.5 package; changed releases need review.
 EFFECTS_VARIANTS = {
-    "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", "[textures]"),
-    "effects:indicators": ("Indicators Removal", "boot.pak", "[textures]"),
-    "effects:truck": ("Truck SFX Removal", "initial.pak", "[media]"),
-    "effects:horn": ("Horn SFX Removal", "initial.pak", "[media]"),
+    "effects:bokeh": ("Bokeh Effect Removal", "boot.pak", (
+        "[textures]/pct/env_camera_bokeh.pct", "[textures]/pct/sfx_flare_sky__s_d.pct")),
+    "effects:indicators": ("Indicators Removal", "boot.pak", (
+        "[textures]/pct/gui_block__d_a.pct", "[textures]/pct/gui_zone_dash.pct")),
+    "effects:truck": ("Truck SFX Removal", "initial.pak", (
+        "[media]/classes/particles/engine_fire.xml", "[media]/classes/particles/engine_sparks.xml",
+        "[media]/classes/particles/intake.xml", "[media]/classes/particles/intake_distortion.xml")),
+    "effects:horn": ("Horn SFX Removal", "initial.pak", (
+        "[media]/classes/particles/honk_distortion.xml", "[media]/classes/particles/honk_dust.xml")),
 }
 
 
 def _effects_payload(source, names, read, mode):
-    option, pak, marker = EFFECTS_VARIANTS[mode]
-    source_path = Path(source).expanduser()
-    selected_option = source_path.is_dir() and source_path.name.lower() == option.lower()
+    option, pak, expected = EFFECTS_VARIANTS[mode]
     roots = set()
     for name in names:
         parts = name.split("/")
-        for i, part in enumerate(parts):
-            if part.lower() == option.lower():
-                roots.add("/".join(parts[:i + 1]))
-    if selected_option:
+        roots.update("/".join(parts[:i + 1]) for i, part in enumerate(parts) if part.lower() == option.lower())
+    path = Path(source).expanduser()
+    if path.is_dir() and path.name.lower() == option.lower():
         roots.add("")
     if len(roots) != 1:
         raise InstallError(f"Effects Removal option {option} is missing or ambiguous. Select the original ZIP or the named option folder.")
     root = next(iter(roots))
-    entries = {}
-    keys = set()
+    actual = {}
     for name in names:
         rel = _under(name, root)
-        if rel is None:
-            continue
-        parts = rel.split("/")
-        if not any(part.lower() in {"[media]", "[textures]", "[meshes]", "[strings]", "initial.cache_block"} for part in parts):
-            continue
-        if len(parts) < 3 or parts[0].lower() != f"to {pak}" or parts[1].lower() != marker:
-            raise InstallError(f"Unexpected Effects Removal payload for {option}: {rel}")
-        target = "/".join(parts[1:])
-        if target.lower() in keys:
-            raise InstallError(f"Duplicate Effects Removal payload path: {target}")
-        keys.add(target.lower())
-        entries[target] = read(name)
-    if not entries:
-        raise InstallError(f"No {marker} payload for {option} in to {pak}.")
-    return {f"pak:{pak}": entries}
+        if rel is not None:
+            key = rel.lower()
+            if key in actual:
+                raise InstallError(f"Duplicate Effects Removal payload path: {rel}")
+            actual[key] = name
+    expected_paths = {f"to {pak}/{target}" for target in expected}
+    if set(actual) != expected_paths:
+        raise InstallError(f"Effects Removal {option} does not match the supported 1.5 layout; missing or unexpected files were found. Check the author's instructions for this release.")
+    return {f"pak:{pak}": {target: read(actual[f"to {pak}/{target}"]) for target in expected}}
 
 
 def _bin_payload(names, read, mode):
