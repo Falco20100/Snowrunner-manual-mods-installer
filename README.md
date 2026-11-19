@@ -4,6 +4,8 @@ A Windows desktop app for manually downloaded SnowRunner mods. Select a game fol
 
 **Release status:** the source and previously uploaded EXE have not been rebuilt and verified together on Windows. The EXE may be older than this source; do not treat it as a current release.
 
+> **AI assistance disclaimer:** This project was developed with AI assistance (code, tests and documentation). The maintainer reviews all functionality, safety logic and mod selections; AI-generated content is not a substitute for the mod authors' instructions, your own backups, or testing on your game copy.
+
 ## Run on Windows
 
 The source version needs **Python 3.9 or newer with Tkinter**. Install Python for Windows from [python.org](https://www.python.org/downloads/windows/), then double-click `Launch.bat`. Alternatively run `py -3 app.py`.
@@ -33,6 +35,21 @@ Build the EXE on Windows; PyInstaller does not cross-compile from Linux. The rep
 5. Start the game and verify each mod. Game updates and store file verification may remove or invalidate mods.
 
 PAK modes need an actual payload such as `[media]`, `[strings]`, `[meshes]`, `[textures]` or `initial.cache_block`, not a full replacement PAK. Unless a dedicated catalog preset handles its variants, extract multi-option archives and select the particular option folder specified by the author. ZIP and extracted folders are supported; extract RAR and 7z using a trusted archive tool first. The installer does not execute downloaded mods or their installers; the separate SnowPatcher shortcut runs only an executable you explicitly select. Never select an untrusted executable.
+
+## Implementable mods
+
+These are the mods this installer can actually install or safely hand off. Everything else was removed from the catalog because it ships its own installer, needs a subscription, replaces entire game archives, or cannot be applied safely by this app.
+
+- **Real Life Mod & Bug Fix (Phase 19)** — dedicated base preset: `[media]`, `[strings]`, `initial.cache_block` → `initial.pak`, MUST-HAVE `[meshes]` → `shared.pak`.
+- **Spotter — SnowRunner Minimap** — ASI payload to `Sources\Bin` with loader-conflict handling (Steam only).
+- **Next Gen Gameplay / Next Gen Tire Inflation / Cargo Straps / Headlight Shadows** — binary payloads to `Sources\Bin`.
+- **Immersive In-Cabin View & Head Out**, **Camera Clipping Fix**, **De-RC-fication**, **Snowrunner Prop Damage Rebalance** — manual `[media]` payloads to `initial.pak`.
+- **Flexible frames and soft suspension** — dedicated two-part preset to `initial.pak`.
+- **Invisible Wall Fixes** — strict four-file `[meshes]` preset to `shared.pak`.
+- **Revisual — Chains and Straps** — one-variant `[textures]` preset to `boot.pak`.
+- **Models Redesign** — `[textures]` preset to `main_menu_textures.pak`.
+- **Effects Removal (Bokeh / Indicators / Truck SFX / Horn SFX)** — pinned 1.5 layout presets to `boot.pak` / `initial.pak`.
+- **Nearby Repair** and **Repair Parts & Spare Wheel Transfer** — SnowPatcher handoff only (SnowPatcher 1.4.0+, Repair Transfer 1.0.5+); this app does not apply their patches directly.
 
 ### Catalog and compatibility
 
