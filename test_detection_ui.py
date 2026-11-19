@@ -250,6 +250,63 @@ class DetectionUITests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_roadmap_mods_match_documented_author_workflows(self):
+        expected = {
+            "Flexible frames and soft suspension": ("https://mod.io/g/snowrunner/m/flexible-frames-and-soft-suspension", "flexible"),
+            "SnowFlyer — Free Camera": ("https://mod.io/g/snowrunner/m/snowflyer-free-camera-mod", "external"),
+            "Invisible Wall Fixes": ("https://mod.io/g/snowrunner/m/invisible-wall-fixes", "invisiblewalls"),
+            "JUSTICE and addons for ALmost ALL": ("https://mod.io/g/snowrunner/m/justice-and-addons-for-allmoust", "external"),
+            "De-RC-fication": ("https://mod.io/g/snowrunner/m/de-rc-fication", "pak:initial.pak"),
+            "Snowrunner Prop Damage Rebalance": ("https://mod.io/g/snowrunner/m/snowrunner-prop-damage-rebalance", "pak:initial.pak"),
+            "SnowRunner Tuning Shop": ("https://mod.io/g/snowrunner/m/snowrunner-tuning-shop", "external"),
+            "lexo1000's Mods Collection": ("https://mod.io/g/snowrunner/c/lexo1000-mods-collection", "external"),
+            "Revisual — Chains and Straps": ("https://mod.io/g/snowrunner/m/revisual-chains-straps", "pak:boot.pak"),
+            "Revisual — Lights and Beacons+": ("https://mod.io/g/snowrunner/m/revisual-lights-and-beacons", "external"),
+        }
+        for title, (url, mode) in expected.items():
+            with self.subTest(title=title):
+                entry, = [item for item in app.CATALOG if item[0] == title]
+                self.assertEqual(entry[1], url)
+                self.assertEqual(entry[2], mode)
+                self.assertTrue(entry[3])
+        self.assertEqual(app.MODES["Flexible frames (both parts)"], "flexible")
+        self.assertEqual(app.MODES["Invisible Wall Fixes → shared.pak"], "invisiblewalls")
+
+    def test_snowpatcher_mods_use_author_workflow_not_manual_queue(self):
+        for title in ("Nearby Repair", "Repair Parts & Spare Wheel Transfer"):
+            with self.subTest(title=title):
+                entry, = [item for item in app.CATALOG if item[0] == title]
+                self.assertEqual(entry[2], "snowpatcher")
+                self.assertIn("1.4.0", entry[3])
+                self.assertIn("1.0.5", entry[3])
+                ui = Mock()
+                ui.selected.return_value = entry
+                with patch.object(app.messagebox, "showinfo", create=True), \
+                     patch.object(app.filedialog, "askopenfilename", create=True) as choose:
+                    app.App.add_catalog(ui, False)
+                choose.assert_not_called()
+                ui.append_job.assert_not_called()
+
+    def test_open_snowpatcher_requires_trusted_executable_and_no_active_operation(self):
+        ui = Mock()
+        ui.busy = True
+        with patch.object(app.messagebox, "showwarning", create=True), \
+             patch.object(app.subprocess, "Popen") as launch:
+            app.App.open_snowpatcher(ui)
+        launch.assert_not_called()
+        ui.busy = False
+        with tempfile.TemporaryDirectory() as directory:
+            exe = Path(directory) / "SnowPatcher.exe"
+            exe.write_bytes(b"fixture")
+            with patch.object(app, "os", types.SimpleNamespace(name="nt")), \
+                 patch.object(app.messagebox, "askyesno", return_value=True, create=True), \
+                 patch.object(app.messagebox, "showerror", create=True) as error, \
+                 patch.object(app.filedialog, "askopenfilename", return_value=str(exe), create=True), \
+                 patch.object(app.subprocess, "Popen") as launch:
+                app.App.open_snowpatcher(ui)
+                launch.assert_called_once_with([str(exe)], cwd=str(exe.parent))
+                error.assert_not_called()
+
     def test_camera_clipping_fix_uses_manual_initial_pak_preset(self):
         entries = [entry for entry in app.CATALOG if entry[0] == "Camera Clipping Fix"]
         self.assertEqual(len(entries), 1)

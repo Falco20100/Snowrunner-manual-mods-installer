@@ -40,6 +40,75 @@ class InstallerTests(unittest.TestCase):
         write_zip(path, files)
         return str(path)
 
+    def test_invisible_wall_fixes_installs_documented_meshes_and_restores(self):
+        package = self.package("walls.zip", {**{name: name.encode() for name in installer.INVISIBLE_WALLS}, "readme.txt": b"author notes"})
+        plan = plan_jobs([Job(package, "invisiblewalls", "Invisible Wall Fixes")])
+        self.assertEqual(plan, {("pak:shared.pak", f"[meshes]/{name}"): (f"[meshes]/{name}", name.encode()) for name in installer.INVISIBLE_WALLS})
+        before = (self.paks / "shared.pak").read_bytes()
+        install(str(self.root), [Job(package, "invisiblewalls", "Invisible Wall Fixes")])
+        with zipfile.ZipFile(self.paks / "shared.pak") as archive:
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            for name in installer.INVISIBLE_WALLS:
+                self.assertEqual(entries[f"[meshes]\\{name}"], name.encode())
+            self.assertEqual(entries["[meshes]\\mesh"], b"original mesh")
+        restore_latest(str(self.root))
+        self.assertEqual((self.paks / "shared.pak").read_bytes(), before)
+
+    def test_invisible_wall_fixes_rejects_a_changed_layout(self):
+        files = {name: b"mesh" for name in installer.INVISIBLE_WALLS}
+        files["models_unexpected"] = b"unexpected"
+        package = self.package("walls.zip", files)
+        with self.assertRaisesRegex(InstallError, "supported 1.0 layout"):
+            install(str(self.root), [Job(package, "invisiblewalls")])
+
+    def test_flexible_frames_installs_both_documented_parts(self):
+        package = self.package("flexible.zip", {
+            "Flexible frames and soft suspension/Flexible frames/[media]/classes/trucks/ank_mk38.xml": b"frame",
+            "Flexible frames and soft suspension/Soft Suspension/[media]/classes/suspensions/s_ank_mk38.xml": b"suspension",
+            "readme.txt": b"author notes",
+        })
+        plan = plan_jobs([Job(package, "flexible", "Flexible frames")])
+        self.assertEqual(plan[("pak:initial.pak", "[media]/classes/trucks/ank_mk38.xml")][1], b"frame")
+        before = (self.paks / "initial.pak").read_bytes()
+        install(str(self.root), [Job(package, "flexible")])
+        with zipfile.ZipFile(self.paks / "initial.pak") as archive:
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            self.assertEqual(entries["[media]\\classes\\trucks\\ank_mk38.xml"], b"frame")
+            self.assertEqual(entries["[media]\\classes\\suspensions\\s_ank_mk38.xml"], b"suspension")
+        restore_latest(str(self.root))
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
+
+    def test_flexible_frames_rejects_a_partial_or_changed_layout(self):
+        partial = self.package("partial.zip", {"Flexible frames/[media]/classes/trucks/ank_mk38.xml": b"frame"})
+        extra = self.package("extra.zip", {
+            "Flexible frames/[media]/classes/trucks/ank_mk38.xml": b"frame",
+            "Soft Suspension/[media]/classes/suspensions/s_ank_mk38.xml": b"suspension",
+            "Unlisted option/[media]/classes/trucks/other.xml": b"other",
+        })
+        for package in (partial, extra):
+            with self.subTest(package=package), self.assertRaisesRegex(InstallError, "two-part layout"):
+                install(str(self.root), [Job(package, "flexible")])
+
+    def test_revisual_chains_requires_one_variant_and_targets_boot_pak(self):
+        variant = self.package("chain.zip", {"V1a/Chain - Normal/[textures]/pct/env_rope_winch__d_a.pct": b"chain"})
+        plan = plan_jobs([Job(variant, "pak:boot.pak", "Revisual — Chains and Straps")])
+        self.assertEqual(plan[("pak:boot.pak", "[textures]/pct/env_rope_winch__d_a.pct")][1], b"chain")
+        several = self.package("variants.zip", {
+            "V1a/Chain - Normal/[textures]/pct/env_rope_winch__d_a.pct": b"chain",
+            "V1a/Strap - Red/[textures]/pct/env_rope_winch__d_a.pct": b"strap",
+        })
+        with self.assertRaisesRegex(InstallError, "exact extracted option folder"):
+            plan_jobs([Job(several, "pak:boot.pak")])
+
+    def test_snowpatcher_package_is_not_installed_as_manual_payload(self):
+        package = self.package("patch.zip", {"snowpatcher.json": b"{}", "payloads/mod.dll": b"not a loader", "[media]/truck.xml": b"not a manual mod"})
+        before = (self.paks / "initial.pak").read_bytes()
+        for mode in ("bin", "pak:initial.pak"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(InstallError, "SnowPatcher package"):
+                install(str(self.root), [Job(package, mode)])
+        self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
+        self.assertFalse((self.bin / "payloads").exists())
+
     def test_camera_clipping_manual_payload_installs_and_restores(self):
         target = "[media]/classes/models/big_watchtower_01.xml"
         archive_name = target.replace("/", "\\")

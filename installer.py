@@ -318,6 +318,45 @@ def _effects_payload(source, names, read, mode):
     return {f"pak:{pak}": {target: read(actual[f"to {pak}/{target}"]) for target in expected}}
 
 
+# Paths from the author's Invisible Wall Fixes 1.0 package; changed releases need review.
+INVISIBLE_WALLS = (
+    "models_power_lines_01_objective", "models_rus_bridge_broken_02",
+    "models_rus_bridge_broken_04b", "models_rus_bridge_road_04nocross",
+)
+FLEXIBLE_PARTS = ("Flexible frames", "Soft Suspension")
+
+
+def _invisible_walls_payload(names, read):
+    expected = set(INVISIBLE_WALLS)
+    actual = {name for name in names if name.lower() != "readme.txt"}
+    if actual != expected:
+        raise InstallError("Invisible Wall Fixes does not match the supported 1.0 layout; missing or unexpected files were found. Check the author's current release.")
+    return {"pak:shared.pak": {f"[meshes]/{name}": read(name) for name in INVISIBLE_WALLS}}
+
+
+def _flexible_payload(names, read):
+    roots = set()
+    candidates = {}
+    for name in names:
+        parts = name.split("/")
+        for i, part in enumerate(parts):
+            if part.lower() == "[media]":
+                roots.add("/".join(parts[:i]))
+                if i:
+                    candidates.setdefault(parts[i - 1].lower(), set()).add("/".join(parts[:i]))
+    expected = {part.lower() for part in FLEXIBLE_PARTS}
+    if set(candidates) != expected or len(roots) != 2 or any(len(paths) != 1 for paths in candidates.values()):
+        raise InstallError("Flexible frames does not match the supported 2.2 two-part layout. Select one inserted component folder instead.")
+    result = {}
+    for part in FLEXIBLE_PARTS:
+        root = next(iter(candidates[part.lower()]))
+        for rel, data in _pak_payload(names, read, "[media]", {"[media]"}, root).items():
+            if rel in result and result[rel] != data:
+                raise InstallError(f"Flexible frames parts change {rel} differently; install one component instead.")
+            result[rel] = data
+    return {"pak:initial.pak": result}
+
+
 def _bin_payload(names, read, mode):
     # Choose a single payload root using the mod's actual entry point, not a documentation or installer folder.
     markers = {"spotter": "Spotter.asi", "gameplay": "Gauges.asi", "tire": "TirePressure.asi", "cargo": "version.dll", "headlights": "d3d11.dll"}
@@ -357,6 +396,8 @@ def plan_jobs(jobs):
     owners = {}
     for job in jobs:
         names, read = _scan(job.source)
+        if any(name.lower() == "snowpatcher.json" for name in names):
+            raise InstallError("SnowPatcher package detected. Import this ZIP into SnowPatcher instead; it cannot be installed as a manual payload.")
         groups = {}
         if job.mode == "rlm":
             root = _choose_root(names, "initial.cache_block")
@@ -375,6 +416,10 @@ def plan_jobs(jobs):
             groups = {"pak:initial.pak": initial, "pak:shared.pak": _pak_payload(names, read, "[meshes]", {"[meshes]"}, next(iter(mesh_roots)))}
         elif job.mode in EFFECTS_VARIANTS:
             groups = _effects_payload(job.source, names, read, job.mode)
+        elif job.mode == "invisiblewalls":
+            groups = _invisible_walls_payload(names, read)
+        elif job.mode == "flexible":
+            groups = _flexible_payload(names, read)
         elif job.mode.startswith("pak:"):
             pak = job.mode[4:]
             if pak not in {"initial.pak", "shared.pak", "boot.pak", "main_menu_textures.pak"}:
