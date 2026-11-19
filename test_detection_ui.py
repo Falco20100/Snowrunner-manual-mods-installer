@@ -256,6 +256,26 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(entries[0][1], "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix")
         self.assertEqual(entries[0][2], "pak:initial.pak")
 
+    def test_no_collision_camera_uses_author_instructions_not_queue(self):
+        entries = [entry for entry in app.CATALOG if entry[0] == "No Collision Camera"]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry[1], "https://mod.io/g/snowrunner/m/no-collision-camera")
+        self.assertEqual(entry[2], "external")
+        self.assertIn("WinRAR", entry[3])
+        self.assertIn("exactly one", entry[3])
+        ui = Mock()
+        ui.selected.return_value = entry
+        with patch.object(app.messagebox, "showinfo", create=True) as info, \
+             patch.object(app.filedialog, "askopenfilename", create=True) as choose_zip, \
+             patch.object(app.filedialog, "askdirectory", create=True) as choose_dir:
+            app.App.add_catalog(ui, False)
+            app.App.add_catalog(ui, True)
+        self.assertEqual(info.call_count, 2)
+        choose_zip.assert_not_called()
+        choose_dir.assert_not_called()
+        ui.append_job.assert_not_called()
+
 
 class UninstallUITests(unittest.TestCase):
     def test_uninstall_confirms_the_exact_latest_batch(self):
