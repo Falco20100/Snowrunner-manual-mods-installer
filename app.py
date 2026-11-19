@@ -11,42 +11,29 @@ import webbrowser
 from installer import InstallError, Job, detect_game_installations, game_paths, install, latest_batch, preflight, restore_latest
 
 
-# The catalog links to authors' pages; SnowPatcher is launched only by user choice.
+# Only mods this app can install, or safely hand off to SnowPatcher, are listed.
+# Author-tool, standalone-executable, subscription, collection and whole-PAK replacement mods were removed.
 CATALOG = [
     ("Real Life Mod & Bug Fix (Phase 19)", "https://mod.io/g/snowrunner/m/real-life-mod", "rlm", "Base files only: [media], [strings], initial.cache_block and MUST-HAVE [meshes]. Optional variants require manual selection. Other truck overhauls may replace the same files."),
-    ("Spotter — SnowRunner Minimap", "https://mod.io/g/snowrunner/m/spotter-snowrunner-minimap", "spotter", "Steam only. Uses an ASI loader; existing loaders are not overwritten. Next Gen's loader can load Spotter. Check the author page for your game build."),
+    ("Spotter — SnowRunner Minimap", "https://mod.io/g/snowrunner/m/spotter-snowrunner-minimap", "spotter", "Steam only. ASI payload for Sources/Bin with loader-conflict handling. Check the author page for your exact game build; disable SnowMap first."),
     ("Next Gen Gameplay", "https://mod.io/g/snowrunner/m/next-gen-gameplay", "gameplay", "Binary payload next to SnowRunner.exe. Loader and ReShade files can conflict with other mods; check the author instructions."),
     ("Next Gen Tire Inflation", "https://mod.io/g/snowrunner/m/tire-inflation-system", "tire", "Binary payload next to SnowRunner.exe. If another ASI loader or ReShade is present, follow the mod author's instructions."),
     ("Cargo Straps (CargoStrap)", "https://mod.io/g/snowrunner/m/cargo-straps-cargostrap", "cargo", "Binary payload. CargoStrap and other mods may provide different version.dll loaders; do not overwrite one blindly."),
-    ("Next Gen Graphics + sky pack", "https://mod.io/g/snowrunner/m/snowrunner-next-gen1", "external", "Download both the program and the separate sky pack, extract to the same folder, and run the author's SnowRunnerNextGen.exe. Install it last. The author tool chooses and applies graphics modules."),
-    ("Headlight Shadows", "https://mod.io/g/snowrunner/m/headlight-shadows", "headlights", "Binary payload under Sources/Bin. Check version-specific compatibility with Next Gen Graphics."),
-    ("SnowRunner Cruise Control (gamepad)", "https://mod.io/g/snowrunner/m/snowrunner-cruise-control-gamepad-only-no-keybo", "external", "ReShade add-on; read its prerequisites and the author's install instructions."),
+    ("Headlight Shadows", "https://mod.io/g/snowrunner/m/headlight-shadows", "headlights", "Binary payload under Sources/Bin. Check current version compatibility before installing."),
     ("Immersive In-Cabin View & Head Out", "https://mod.io/g/snowrunner/m/immersive-in-cabin-view-head-out", "pak:initial.pak", "Select its intended [media] payload. May conflict with other truck XML modifications."),
-    ("Camera Clipping Fix", "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix", "pak:initial.pak", "Original manual release: [media] into initial.pak. Already included in McKillem's Tweak Pack; can overlap No Collision Camera and other object XML mods. Check the author page for game compatibility."),
-    ("No Collision Camera", "https://mod.io/g/snowrunner/m/no-collision-camera", "external", "Manual installation with WinRAR per the author. Choose exactly one of the default or improved wheel-grip folders. Back up initial.pak outside the PAK folder; overlaps Camera Clipping Fix and other object XML mods. Check game version and author instructions."),
+    ("Camera Clipping Fix", "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix", "pak:initial.pak", "Original manual release: [media] into initial.pak. Can overlap other object XML mods. Check the author page for game compatibility."),
     ("Flexible frames and soft suspension", "https://mod.io/g/snowrunner/m/flexible-frames-and-soft-suspension", "flexible", "Manual install into initial.pak. This preset applies both documented parts; to use only one, add that extracted component with 'PAK payload → initial.pak'. Conflicts with other truck or suspension XML edits. Check the current 2.2 release and game version."),
-    ("SnowFlyer — Free Camera", "https://mod.io/g/snowrunner/m/snowflyer-free-camera-mod", "external", "Author's standalone SnowFlyer2.exe patches the running game; unzip and run it, not this app's PAK writer. Steam and Epic only. Get a current build after game updates."),
     ("Invisible Wall Fixes", "https://mod.io/g/snowrunner/m/invisible-wall-fixes", "invisiblewalls", "Manual [meshes] replacement in shared.pak. The preset accepts only the author's 1.0 four models_* files and rejects other layouts. This release is older; check game compatibility and back up shared.pak."),
-    ("JUSTICE and addons for ALmost ALL", "https://mod.io/g/snowrunner/m/justice-and-addons-for-allmoust", "external", "Author replaces the whole initial.pak and provides variants, some depending on owned seasons. This app never replaces a whole game archive. Back up initial.pak outside the game folder and follow the author's variant choice."),
     ("De-RC-fication", "https://mod.io/g/snowrunner/m/de-rc-fication", "pak:initial.pak", "Manual [media] merge into initial.pak. Changes trucks, suspensions, tires and DLC XML; conflicts with other truck XML mods. Remove added roof racks in the garage before uninstalling, as the author advises."),
     ("Snowrunner Prop Damage Rebalance", "https://mod.io/g/snowrunner/m/snowrunner-prop-damage-rebalance", "pak:initial.pak", "Manual [media] merge into initial.pak. Changes plant and prop XML, not trucks. In co-op every player reportedly needs it. Check the current 1.0 release and back up first."),
-    ("SnowRunner Tuning Shop", "https://mod.io/g/snowrunner/m/snowrunner-tuning-shop", "external", "Author's desktop tuning application edits initial.pak with its own original baseline and restore. Run it separately and keep your own backup; do not queue its installer."),
-    ("lexo1000's Mods Collection", "https://mod.io/g/snowrunner/c/lexo1000-mods-collection", "external", "A mod.io collection, not one manual package. Subscribe and enable each chosen mod in the game; check every included mod's own requirements, version and conflicts."),
     ("Revisual — Chains and Straps", "https://mod.io/g/snowrunner/m/revisual-chains-straps", "pak:boot.pak", "Manual [textures] into boot.pak. Extract the ZIP, choose exactly one variant folder (for example 'Chain - Normal' or 'Strap - Red'), and add that folder; the whole ZIP is intentionally ambiguous. Back up boot.pak."),
-    ("Revisual — Lights and Beacons+", "https://mod.io/g/snowrunner/m/revisual-lights-and-beacons", "external", "Subscription mod: subscribe and enable it in the game's mod browser, not with this app's PAK writer. Revisual manual packs have separate author pages and variants."),
     ("Nearby Repair", "https://mod.io/g/snowrunner/m/nearby-repair", "snowpatcher", "Requires SnowPatcher 1.4.0 or newer. Open SnowPatcher, add this mod's link or ZIP, enable it and Apply with the game closed. To use both mods, Repair Parts & Spare Wheel Transfer must be 1.0.5 or newer."),
     ("Repair Parts & Spare Wheel Transfer", "https://mod.io/g/snowrunner/m/repair-parts-spare-wheel-transfer", "snowpatcher", "Use version 1.0.5 or newer with SnowPatcher 1.4.0 or newer, especially when using Nearby Repair. Remove older manual installations or restore their backup first. Add the mod's link or ZIP in SnowPatcher, enable it and Apply with the game closed."),
-    ("Weather Overhaul", "https://mod.io/g/snowrunner/m/weather-overhaul", "external", "Select each intended option folder and target PAK as directed by the author. May overlap Next Gen Graphics and Effects Removal."),
     ("Models Redesign", "https://mod.io/g/snowrunner/m/models-redesign", "pak:main_menu_textures.pak", "Select the [textures] payload for main_menu_textures.pak."),
-    ("Interface Refinement", "https://mod.io/g/snowrunner/m/interface-overhaul", "external", "Follow the author's target-archive and option instructions; select an extracted payload using a PAK mode."),
-    ("LOD Optimizer", "https://mod.io/g/snowrunner/m/lod-optimizer", "external", "Author's Python patcher; run it separately and choose the options yourself. Check for overlap with Next Gen Graphics."),
-    ("Effects Removal — Bokeh", "https://mod.io/g/snowrunner/m/effects-removal", "effects:bokeh", "Install only Bokeh to boot.pak. Already included in Weather Overhaul. Select the full ZIP or the named Bokeh Effect Removal folder."),
-    ("Effects Removal — Indicators", "https://mod.io/g/snowrunner/m/effects-removal", "effects:indicators", "Install only Indicators to boot.pak. Already included in Gameplay Tweaks by a different method. Select the full ZIP or the named Indicators Removal folder."),
+    ("Effects Removal — Bokeh", "https://mod.io/g/snowrunner/m/effects-removal", "effects:bokeh", "Install only Bokeh to boot.pak. Select the full ZIP or the named Bokeh Effect Removal folder."),
+    ("Effects Removal — Indicators", "https://mod.io/g/snowrunner/m/effects-removal", "effects:indicators", "Install only Indicators to boot.pak. Select the full ZIP or the named Indicators Removal folder."),
     ("Effects Removal — Truck SFX", "https://mod.io/g/snowrunner/m/effects-removal", "effects:truck", "Install only Truck SFX to initial.pak. Select the full ZIP or the named Truck SFX Removal folder."),
     ("Effects Removal — Horn SFX", "https://mod.io/g/snowrunner/m/effects-removal", "effects:horn", "Install only Horn SFX to initial.pak. Select the full ZIP or the named Horn SFX Removal folder."),
-    ("Gameplay Tweaks", "https://mod.io/g/snowrunner/m/gameplay-tweaks", "external", "Author's patcher modifies initial.cache_block; use its instructions. Applying a replacement cache afterward can undo it."),
-    ("Persistent mud and realism", "https://mod.io/g/snowrunner/m/persistent-mud-and-realism", "external", "Use the author's launcher and Install.cmd; it has its own configuration and loader compatibility constraints."),
-    ("Serj4ever's QoL Pack - ONLY FOR PC", "https://mod.io/g/snowrunner/m/serj4evers-qol-modpack-only-for-pc", "pak:initial.pak", "[media] into initial.pak. May overlap Real Life Mod and other truck XML edits; conflicts are not merged."),
 ]
 MODES = {
     "Real Life Mod base": "rlm",
@@ -145,7 +132,7 @@ class App(tk.Tk):
         ttk.Button(detail, text="Add downloaded ZIP…", command=lambda: self.add_catalog(False)).grid(row=3, column=0, sticky="w", pady=(0, 8))
         ttk.Button(detail, text="Add extracted folder…", command=lambda: self.add_catalog(True)).grid(row=4, column=0, sticky="w")
         ttk.Button(detail, text="Open SnowPatcher…", command=self.open_snowpatcher).grid(row=5, column=0, sticky="w", pady=(12, 0))
-        ttk.Label(detail, text="Some mods are standalone tools. Open the author page and follow their instructions; they cannot be safely installed as a generic file copy.", wraplength=470, justify="left").grid(row=6, column=0, sticky="w", pady=(22, 0))
+        ttk.Label(detail, text="Only mods this app can install, or safely hand off to SnowPatcher, are listed. Author-tool and subscription mods are intentionally not included.", wraplength=470, justify="left").grid(row=6, column=0, sticky="w", pady=(22, 0))
         self.library.selection_set(0)
         self.select_catalog()
 

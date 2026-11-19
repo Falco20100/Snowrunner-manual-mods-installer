@@ -253,15 +253,10 @@ class CatalogTests(unittest.TestCase):
     def test_roadmap_mods_match_documented_author_workflows(self):
         expected = {
             "Flexible frames and soft suspension": ("https://mod.io/g/snowrunner/m/flexible-frames-and-soft-suspension", "flexible"),
-            "SnowFlyer — Free Camera": ("https://mod.io/g/snowrunner/m/snowflyer-free-camera-mod", "external"),
             "Invisible Wall Fixes": ("https://mod.io/g/snowrunner/m/invisible-wall-fixes", "invisiblewalls"),
-            "JUSTICE and addons for ALmost ALL": ("https://mod.io/g/snowrunner/m/justice-and-addons-for-allmoust", "external"),
             "De-RC-fication": ("https://mod.io/g/snowrunner/m/de-rc-fication", "pak:initial.pak"),
             "Snowrunner Prop Damage Rebalance": ("https://mod.io/g/snowrunner/m/snowrunner-prop-damage-rebalance", "pak:initial.pak"),
-            "SnowRunner Tuning Shop": ("https://mod.io/g/snowrunner/m/snowrunner-tuning-shop", "external"),
-            "lexo1000's Mods Collection": ("https://mod.io/g/snowrunner/c/lexo1000-mods-collection", "external"),
             "Revisual — Chains and Straps": ("https://mod.io/g/snowrunner/m/revisual-chains-straps", "pak:boot.pak"),
-            "Revisual — Lights and Beacons+": ("https://mod.io/g/snowrunner/m/revisual-lights-and-beacons", "external"),
         }
         for title, (url, mode) in expected.items():
             with self.subTest(title=title):
@@ -313,25 +308,26 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(entries[0][1], "https://mod.io/g/snowrunner/m/manual-camera-clipping-fix")
         self.assertEqual(entries[0][2], "pak:initial.pak")
 
-    def test_no_collision_camera_uses_author_instructions_not_queue(self):
-        entries = [entry for entry in app.CATALOG if entry[0] == "No Collision Camera"]
-        self.assertEqual(len(entries), 1)
-        entry = entries[0]
-        self.assertEqual(entry[1], "https://mod.io/g/snowrunner/m/no-collision-camera")
-        self.assertEqual(entry[2], "external")
-        self.assertIn("WinRAR", entry[3])
-        self.assertIn("exactly one", entry[3])
-        ui = Mock()
-        ui.selected.return_value = entry
-        with patch.object(app.messagebox, "showinfo", create=True) as info, \
-             patch.object(app.filedialog, "askopenfilename", create=True) as choose_zip, \
-             patch.object(app.filedialog, "askdirectory", create=True) as choose_dir:
-            app.App.add_catalog(ui, False)
-            app.App.add_catalog(ui, True)
-        self.assertEqual(info.call_count, 2)
-        choose_zip.assert_not_called()
-        choose_dir.assert_not_called()
-        ui.append_job.assert_not_called()
+    def test_incompatible_or_external_mods_are_not_in_catalog(self):
+        removed = {
+            "Next Gen Graphics + sky pack",
+            "SnowRunner Cruise Control (gamepad)",
+            "No Collision Camera",
+            "SnowFlyer — Free Camera",
+            "JUSTICE and addons for ALmost ALL",
+            "SnowRunner Tuning Shop",
+            "lexo1000's Mods Collection",
+            "Revisual — Lights and Beacons+",
+            "Weather Overhaul",
+            "Interface Refinement",
+            "LOD Optimizer",
+            "Gameplay Tweaks",
+            "Persistent mud and realism",
+            "Serj4ever's QoL Pack - ONLY FOR PC",
+        }
+        titles = {entry[0] for entry in app.CATALOG}
+        self.assertFalse(titles & removed)
+        self.assertFalse(any(entry[2] == "external" for entry in app.CATALOG))
 
 
 class UninstallUITests(unittest.TestCase):
