@@ -54,7 +54,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
         install(str(self.root), jobs)
         with zipfile.ZipFile(self.paks / "initial.pak") as archive:
-            self.assertEqual(archive.read(archive_name), b"camera fix")
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            self.assertEqual(entries[archive_name], b"camera fix")
             self.assertEqual(archive.read("untouched"), b"keep")
         restore_latest(str(self.root))
         self.assertEqual((self.paks / "initial.pak").read_bytes(), before)
@@ -168,10 +169,12 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
         install(str(self.root), jobs)
         with zipfile.ZipFile(self.paks / "boot.pak") as archive:
-            self.assertEqual(archive.read(bokeh.replace("/", "\\")), b"effects:bokeh")
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            self.assertEqual(entries[bokeh.replace("/", "\\")], b"effects:bokeh")
             self.assertEqual(archive.read("unchanged"), b"keep")
         with zipfile.ZipFile(self.paks / "initial.pak") as archive:
-            self.assertEqual(archive.read(horn.replace("/", "\\")), b"effects:horn")
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            self.assertEqual(entries[horn.replace("/", "\\")], b"effects:horn")
         restore_latest(str(self.root))
         self.assertEqual(before, {name: (self.paks / name).read_bytes() for name in before})
 
@@ -278,7 +281,8 @@ installer.install(sys.argv[1], [installer.Job(sys.argv[2], "pak:initial.pak"), i
         self.assertEqual(result.returncode, 23, result.stderr)
         self.assertEqual((self.paks / "shared.pak").read_bytes(), before_shared)
         with zipfile.ZipFile(self.paks / "initial.pak") as archive:
-            self.assertEqual(archive.read("[media]\\truck.xml"), b"changed")
+            entries = {info.orig_filename: archive.read(info) for info in archive.infolist()}
+            self.assertEqual(entries["[media]\\truck.xml"], b"changed")
         manifest_path = next((self.root / "SnowRunnerManualBackups").glob("*/manifest.json"))
         self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["status"], "ready")
         for operation in (lambda: restore_latest(str(self.root)), lambda: install(str(self.root), [Job(second, "pak:shared.pak")])):
@@ -551,6 +555,43 @@ installer.install(sys.argv[1], [installer.Job(sys.argv[2], "pak:initial.pak"), i
                 restore_latest(str(self.root))
         self.assertEqual(target.read_bytes(), before)
         self.assertEqual(json.loads((backup / "manifest.json").read_text())["status"], "restoring")
+
+    def test_uninstall_revalidates_manifest_loaded_after_preview(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        target = self.paks / "initial.pak"
+        before = target.read_bytes()
+        latest = installer.latest_batch
+        def alter_after_preview(root):
+            result = latest(root)
+            record = backup / "manifest.json"
+            manifest = json.loads(record.read_text())
+            manifest["changes"][0]["backup"] = None
+            record.write_text(json.dumps(manifest))
+            return result
+        with patch.object(installer, "latest_batch", side_effect=alter_after_preview):
+            with self.assertRaisesRegex(InstallError, "Unresolved backup"):
+                restore_latest(str(self.root))
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_uninstall_refuses_manifest_changed_while_staging(self):
+        package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})
+        backup = install(str(self.root), [Job(package, "pak:initial.pak")])
+        target = self.paks / "initial.pak"
+        before = target.read_bytes()
+        original_copy = installer.shutil.copy2
+        def change_record(source, dest, *args, **kwargs):
+            result = original_copy(source, dest, *args, **kwargs)
+            record = backup / "manifest.json"
+            manifest = json.loads(record.read_text())
+            manifest["labels"] = ["changed externally"]
+            record.write_text(json.dumps(manifest))
+            return result
+        with patch.object(installer.shutil, "copy2", side_effect=change_record):
+            with self.assertRaisesRegex(InstallError, "manifest.*changed"):
+                restore_latest(str(self.root))
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(json.loads((backup / "manifest.json").read_text())["status"], "installed")
 
     def test_malformed_pak_record_cannot_delete_archive(self):
         package = self.package("mod.zip", {"[media]/truck.xml": b"mod"})

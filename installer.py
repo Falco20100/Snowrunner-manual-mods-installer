@@ -898,7 +898,14 @@ def restore_latest(root, log=lambda _: None, expected_backup=None):
     if expected_backup is not None and backup != Path(expected_backup):
         raise InstallError("The latest batch changed after confirmation. Review it again before uninstalling.")
     manifest_path = backup / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if not isinstance(manifest, dict) or manifest.get("game") != str(base) or manifest.get("status") != "installed":
+            raise ValueError("invalid game or status")
+        _validate_installed_manifest(base, manifest)
+    except (OSError, ValueError, UnicodeError, InstallError, TypeError) as exc:
+        raise InstallError(f"Unresolved backup at {backup}: {exc}. Review it manually before installing or uninstalling; no files were changed.") from exc
     staged = []
     try:
         # Validate all targets and prepare all replacement files before writing.
@@ -928,6 +935,8 @@ def restore_latest(root, log=lambda _: None, expected_backup=None):
             target = _safe_target(base, item["target"])
             if not target.is_file() or digest(target) != item["installed_hash"]:
                 raise InstallError(f"Cannot restore: {target} changed while preparing the uninstall. Review it before retrying.")
+        if manifest_path.read_bytes() != manifest_bytes:
+            raise InstallError(f"Backup manifest changed during uninstall: {manifest_path}. Review it before retrying.")
         manifest["status"] = "restoring"
         _write_manifest(manifest_path, manifest)
         for (target, tmp, source_hash), item in reversed(list(zip(staged, manifest["changes"]))):
