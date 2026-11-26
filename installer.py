@@ -207,17 +207,80 @@ def assert_game_closed():
             raise InstallError("Close SnowRunner before installing or restoring.")
 
 
+_ARCHIVE_SUFFIXES = {".rar", ".7z"}
+
+
+def _archive_tools():
+    """Locate an installed 7-Zip, WinRAR or UnRAR; nothing is bundled."""
+    roots = [os.environ.get(name) for name in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)")]
+    roots = [Path(root) for root in roots if root]
+    found = []
+    candidates = (
+        ("7z", [root / "7-Zip" / exe for root in roots for exe in ("7z.exe", "7za.exe")]
+               + [Path(item) for item in (shutil.which(name) for name in ("7z", "7za", "7zz")) if item]),
+        ("winrar", [root / "WinRAR" / "WinRAR.exe" for root in roots]
+                   + [Path(item) for item in (shutil.which("WinRAR"),) if item]),
+        ("unrar", [root / "WinRAR" / "UnRAR.exe" for root in roots]
+                  + [Path(item) for item in (shutil.which(name) for name in ("UnRAR", "unrar")) if item]),
+    )
+    for kind, paths in candidates:
+        for path in paths:
+            if path.is_file():
+                found.append((kind, str(path)))
+                break
+    return found
+
+
+def _extract_command(kind, executable, archive, dest):
+    if kind == "7z":
+        return [executable, "x", "-y", f"-o{dest}", str(archive)]
+    if kind == "winrar":
+        return [executable, "x", "-ibck", "-y", str(archive), str(dest) + os.sep]
+    return [executable, "x", "-o+", "-y", str(archive), str(dest) + os.sep]
+
+
+def _run_archiver(kind, executable, archive, dest):
+    result = subprocess.run(_extract_command(kind, executable, archive, dest), capture_output=True,
+                            text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit code {result.returncode}"
+        raise InstallError(f"Could not extract {Path(archive).name}: {reason}")
+
+
+def _folder_files(root: Path):
+    files = {}
+    for p in root.rglob("*"):
+        if p.is_symlink():
+            raise InstallError(f"Symbolic links are not supported: {p}")
+        if p.is_file():
+            key = normalize(p.relative_to(root).as_posix())
+            files[key] = p
+    return files
+
+
+def _scan_archive(path: Path):
+    """Extract .rar/.7z with an installed archiver, read it, then remove the temp copy."""
+    tools = _archive_tools()
+    if not tools:
+        raise InstallError(f"Not a folder or ZIP archive: {path}. Install 7-Zip, WinRAR or UnRAR to open {path.suffix} files, or extract it first.")
+    with tempfile.TemporaryDirectory(prefix="srmi-extract-") as tmp:
+        _run_archiver(*tools[0], path, Path(tmp))
+        files = _folder_files(Path(tmp))
+        payload = {key: member.read_bytes() for key, member in files.items()}
+    if not payload:
+        raise InstallError(f"Package is empty: {path}")
+    return list(payload), payload.__getitem__
+
+
 def _scan(source: str):
-    """Return safe relative paths and a reader, for a folder or zip."""
+    """Return safe relative paths and a reader, for a folder or archive."""
     path = Path(source).expanduser().resolve()
     files = {}
+    if path.is_file() and path.suffix.lower() in _ARCHIVE_SUFFIXES:
+        return _scan_archive(path)
     if path.is_dir():
-        for p in path.rglob("*"):
-            if p.is_symlink():
-                raise InstallError(f"Symbolic links are not supported: {p}")
-            if p.is_file():
-                key = normalize(p.relative_to(path).as_posix())
-                files[key] = p
+        files = _folder_files(path)
         def read(key):
             return files[key].read_bytes()
     elif path.is_file() and zipfile.is_zipfile(path):

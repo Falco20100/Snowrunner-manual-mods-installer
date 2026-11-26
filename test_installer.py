@@ -1001,5 +1001,84 @@ class DetectionTests(unittest.TestCase):
             self.assertEqual(installer.detect_game_installations(), [("Steam", str(steam)), ("Epic Games", str(epic))])
 
 
+class ArchiveSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def fake_extract(kind, executable, archive, dest):
+        with zipfile.ZipFile(archive) as archive_file:
+            archive_file.extractall(dest)
+
+    def test_extract_commands_match_each_tool(self):
+        self.assertEqual(installer._extract_command("7z", "7z.exe", "a.7z", "out"),
+                         ["7z.exe", "x", "-y", "-oout", "a.7z"])
+        self.assertEqual(installer._extract_command("unrar", "unrar.exe", "a.rar", "out"),
+                         ["unrar.exe", "x", "-o+", "-y", "a.rar", "out" + os.sep])
+        self.assertIn("-ibck", installer._extract_command("winrar", "WinRAR.exe", "a.rar", "out"))
+
+    def test_archive_tools_prefer_bundled_7zip_location(self):
+        program_files = self.dir / "Program Files"
+        (program_files / "7-Zip").mkdir(parents=True)
+        (program_files / "7-Zip" / "7z.exe").write_bytes(b"stub")
+        with patch.dict(os.environ, {"ProgramFiles": str(program_files), "ProgramFiles(x86)": "", "ProgramW6432": ""}), \
+             patch.object(installer.shutil, "which", return_value=None):
+            self.assertEqual(installer._archive_tools(), [("7z", str(program_files / "7-Zip" / "7z.exe"))])
+
+    def test_archive_tools_empty_when_nothing_installed(self):
+        with patch.dict(os.environ, {"ProgramFiles": str(self.dir), "ProgramFiles(x86)": "", "ProgramW6432": ""}), \
+             patch.object(installer.shutil, "which", return_value=None):
+            self.assertEqual(installer._archive_tools(), [])
+
+    def test_missing_archiver_explains_options(self):
+        archive = self.dir / "pack.rar"
+        archive.write_bytes(b"unused")
+        with patch.object(installer, "_archive_tools", return_value=[]):
+            with self.assertRaises(InstallError) as caught:
+                installer._scan(str(archive))
+        self.assertIn("7-Zip", str(caught.exception))
+        self.assertIn("pack.rar", str(caught.exception))
+
+    def test_rar_is_extracted_read_and_temp_removed(self):
+        archive = self.dir / "pack.rar"
+        write_zip(archive, {"[media]/classes/trucks/ank.xml": b"frame"})
+        with patch.object(installer, "_archive_tools", return_value=[("7z", "7z.exe")]), \
+             patch.object(installer, "_run_archiver", side_effect=self.fake_extract):
+            names, read = installer._scan(str(archive))
+        self.assertEqual(names, ["[media]/classes/trucks/ank.xml"])
+        self.assertEqual(read("[media]/classes/trucks/ank.xml"), b"frame")
+        self.assertEqual(list(Path(tempfile.gettempdir()).glob("srmi-extract-*")), [])
+
+    def test_7z_archive_plans_a_pak_payload(self):
+        archive = self.dir / "mod.7z"
+        write_zip(archive, {"[media]/classes/trucks/ank.xml": b"frame", "readme.txt": b"notes"})
+        with patch.object(installer, "_archive_tools", return_value=[("unrar", "unrar.exe")]), \
+             patch.object(installer, "_run_archiver", side_effect=self.fake_extract):
+            plan = plan_jobs([Job(str(archive), "pak:initial.pak")])
+        self.assertEqual(plan[("pak:initial.pak", "[media]/classes/trucks/ank.xml")],
+                         ("[media]/classes/trucks/ank.xml", b"frame"))
+
+    def test_failed_extraction_reports_reason_and_leaves_no_temp(self):
+        archive = self.dir / "broken.7z"
+        archive.write_bytes(b"broken")
+        before = set(Path(tempfile.gettempdir()).glob("srmi-extract-*"))
+        with patch.object(installer, "_archive_tools", return_value=[("7z", "7z.exe")]), \
+             patch.object(installer, "_run_archiver", side_effect=InstallError("Could not extract broken.7z: bad archive")):
+            with self.assertRaises(InstallError) as caught:
+                installer._scan(str(archive))
+        self.assertIn("bad archive", str(caught.exception))
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("srmi-extract-*")) - before, set())
+
+    def test_unknown_file_type_still_rejected(self):
+        other = self.dir / "notes.txt"
+        other.write_text("hello")
+        with self.assertRaises(InstallError):
+            installer._scan(str(other))
+
+
 if __name__ == "__main__":
     unittest.main()

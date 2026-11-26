@@ -282,12 +282,12 @@ class App(tk.Tk):
         if item[2] in {"external", "snowpatcher"}:
             messagebox.showinfo("Author's installation required", item[3])
             return
-        path = filedialog.askdirectory(title="Choose extracted mod folder") if folder else filedialog.askopenfilename(title="Choose downloaded mod ZIP", filetypes=[("ZIP archives", "*.zip"), ("All files", "*.*")])
+        path = filedialog.askdirectory(title="Choose extracted mod folder") if folder else filedialog.askopenfilename(title="Choose downloaded mod archive", filetypes=[("Mod archives", "*.zip *.rar *.7z"), ("All files", "*.*")])
         if path:
             self.append_job(path, item[2], item[0])
 
     def add_zips(self):
-        for path in filedialog.askopenfilenames(title="Choose mod ZIP archives", filetypes=[("ZIP archives", "*.zip"), ("All files", "*.*")]):
+        for path in filedialog.askopenfilenames(title="Choose mod archives", filetypes=[("Mod archives", "*.zip *.rar *.7z"), ("All files", "*.*")]):
             self.append_job(path, MODES[self.mode.get()])
 
     def add_folder(self):

@@ -10,3 +10,6 @@ dist/
 # Local scratch
 .task-mod-baseline/
 *.zip
+
+# Mod archives kept locally
+*.rar
