@@ -2,7 +2,7 @@
 
 A Windows desktop app for manually downloaded SnowRunner mods. Select a game folder, add one or more mod ZIPs or extracted payload folders, review the queue, and install recognized binary and PAK layouts. Mod files are **not** included or downloaded automatically; use the catalog to open the authors' pages and download them yourself.
 
-**Release status:** the source and previously uploaded EXE have not been rebuilt and verified together on Windows. The EXE may be older than this source; do not treat it as a current release.
+**Release status (v0.2.0, pre-release):** each release ships `SnowRunnerManualInstaller.exe`, built from that tag's source on a Windows runner by [`.github/workflows/build-exe.yml`](.github/workflows/build-exe.yml) after the test suite passes. The release notes list the binary's size and SHA-256.
 
 > **AI assistance disclaimer:** This project was developed with AI assistance (code, tests and documentation). The maintainer reviews all functionality, safety logic and mod selections; AI-generated content is not a substitute for the mod authors' instructions, your own backups, or testing on your game copy.
 
@@ -12,7 +12,7 @@ The source version needs **Python 3.9 or newer with Tkinter**. Install Python fo
 
 ### Build or rebuild the portable EXE
 
-1. Download or clone this repository onto a Windows PC and extract it if needed. The repository includes `icon.png` and an uploaded `SnowRunnerManualInstaller.exe`.
+1. Download or clone this repository onto a Windows PC and extract it if needed. The repository includes `icon.png` and a prebuilt `SnowRunnerManualInstaller.exe` that matches the current source; the same binary is attached to the release page.
 2. Install **Python 3.13** with pip and Tkinter from [python.org](https://www.python.org/downloads/windows/). Python 3.15 is not compatible with the pinned PyInstaller 6.11.1.
 3. Close any running instance of the app, then double-click `Build-Portable.bat`. The script uses Python 3.13, installs PyInstaller 6.11.1 and Pillow, and bundles `icon.png` as the EXE and window icon.
 4. The rebuilt executable is `dist\SnowRunnerManualInstaller.exe`. Copy it anywhere on a Windows PC; Python is not needed to run the EXE.
@@ -24,7 +24,7 @@ py -3.13 -m pip install pyinstaller==6.11.1 pillow
 py -3.13 -m PyInstaller --noconfirm --clean --onefile --windowed --icon "icon.png" --add-data "icon.png;." --name SnowRunnerManualInstaller app.py
 ```
 
-Build the EXE on Windows; PyInstaller does not cross-compile from Linux. The repository includes no installation wizard. The separately uploaded EXE is not automatically rebuilt when the source changes.
+Build the EXE on Windows; PyInstaller does not cross-compile from Linux. The repository includes no installation wizard. Tagging a release (`v*`) rebuilds and re-attaches the EXE automatically, so the download and the source stay in step.
 
 ## Install
 
